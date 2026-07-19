@@ -6,6 +6,8 @@
 <title>Career Bridge</title>
 <script src="https://js.paystack.co/v1/inline.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -106,6 +108,39 @@ const VERIFY_PAYMENT_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/verify-payment
 const PAYSTACK_PUBLIC_KEY = "YOUR_PAYSTACK_PUBLIC_KEY";
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Reads a PDF or DOCX file the user uploaded and returns its plain text,
+// so it can be dropped into the resume textarea without leaving the app.
+async function extractTextFromFile(file) {
+  const name = file.name.toLowerCase();
+
+  if (name.endsWith(".pdf")) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    const buffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+    let text = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      text += content.items.map(item => item.str).join(" ") + "\n";
+    }
+    return text.trim();
+  }
+
+  if (name.endsWith(".docx")) {
+    const buffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer: buffer });
+    return result.value.trim();
+  }
+
+  if (name.endsWith(".doc")) {
+    throw new Error("Old .doc format isn't supported — please save as .docx or .pdf and try again.");
+  }
+
+  // Fallback: plain text file
+  return await file.text();
+}
 
 const app = document.getElementById("app");
 
@@ -342,22 +377,22 @@ async function renderProfile(user) {
       <form id="profileForm">
         ${field("full_name", "Full name", v.full_name)}
         ${field("current_location", "Current location", v.current_location)}
-        ${field("country", "Country", v.country)}
+        ${selectField("country", "Country", v.country, COUNTRIES)}
         ${field("state", "State", v.state)}
         ${field("city", "City", v.city)}
         ${field("postal_code", "Postal code", v.postal_code)}
         ${field("nationality", "Nationality", v.nationality)}
-        ${field("work_authorization", "Work authorization", v.work_authorization)}
+        ${selectField("work_authorization", "Work authorization", v.work_authorization, WORK_AUTH_OPTIONS)}
         ${field("preferred_countries", "Preferred countries (comma-separated)", arr(v.preferred_countries))}
         ${field("preferred_salary", "Preferred salary", v.preferred_salary)}
-        ${field("preferred_job_type", "Preferred job type", v.preferred_job_type)}
-        ${field("remote_or_hybrid", "Remote or hybrid", v.remote_or_hybrid)}
-        ${field("experience_level", "Experience level", v.experience_level)}
+        ${selectField("preferred_job_type", "Preferred job type", v.preferred_job_type, JOB_TYPE_OPTIONS)}
+        ${selectField("remote_or_hybrid", "Remote or hybrid", v.remote_or_hybrid, REMOTE_HYBRID_OPTIONS)}
+        ${selectField("experience_level", "Experience level", v.experience_level, EXPERIENCE_LEVEL_OPTIONS)}
         ${field("education", "Education", v.education)}
         ${field("skills", "Skills (comma-separated)", arr(v.skills))}
         ${field("languages", "Languages (comma-separated)", arr(v.languages))}
         ${field("years_of_experience", "Years of experience", v.years_of_experience, "number")}
-        ${field("availability", "Availability", v.availability)}
+        ${selectField("availability", "Availability", v.availability, AVAILABILITY_OPTIONS)}
         ${field("preferred_industries", "Preferred industries (comma-separated)", arr(v.preferred_industries))}
         ${field("preferred_roles", "Preferred roles (comma-separated)", arr(v.preferred_roles))}
 
@@ -441,8 +476,23 @@ async function renderProfile(user) {
     const path = `${user.id}/resume-${file.name}`;
     const { error } = await sb.storage.from("documents").upload(path, file, { upsert: true });
 
-    msg.className = error ? "msg error" : "msg success";
-    msg.textContent = error ? error.message : "Resume uploaded successfully.";
+    if (error) {
+      msg.className = "msg error";
+      msg.textContent = error.message;
+      return;
+    }
+
+    // Also extract the text content and save it, so the AI screens
+    // (Match & Tailor, Interview Prep) have it ready automatically.
+    try {
+      const text = await extractTextFromFile(file);
+      await sb.from("profiles").update({ resume_text: text }).eq("id", userId);
+      msg.className = "msg success";
+      msg.textContent = "Resume uploaded and text extracted — ready for AI matching.";
+    } catch (extractErr) {
+      msg.className = "msg success";
+      msg.textContent = "Resume uploaded. (Text extraction failed — you can paste it manually on the AI Match page.)";
+    }
   });
 }
 
@@ -459,7 +509,11 @@ async function renderMatch(user) {
     </div>
 
     <div class="card">
-      <label>Paste your resume text</label>
+      <label>Upload resume (PDF or DOCX) — or paste text below</label>
+      <input type="file" id="resumeFileInput" accept=".pdf,.docx,.txt" />
+      <div class="msg hidden" id="extractMsg"></div>
+
+      <label>Resume text</label>
       <textarea id="resumeText" rows="8" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;">${p?.resume_text || ''}</textarea>
 
       <label>Paste the job description</label>
@@ -480,6 +534,25 @@ async function renderMatch(user) {
 
   document.getElementById("backBtn").addEventListener("click", () => {
     window.location.hash = "dashboard";
+  });
+
+  document.getElementById("resumeFileInput").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const msg = document.getElementById("extractMsg");
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Reading file...";
+
+    try {
+      const text = await extractTextFromFile(file);
+      document.getElementById("resumeText").value = text;
+      msg.className = "msg success";
+      msg.textContent = "Resume text loaded. Review below, then continue.";
+    } catch (err) {
+      msg.className = "msg error";
+      msg.textContent = err.message;
+    }
   });
 
   async function callTailorFunction(action) {
@@ -857,6 +930,10 @@ async function renderInterview(user) {
     </div>
 
     <div class="card">
+      <label>Upload resume (PDF or DOCX) — or paste text below</label>
+      <input type="file" id="resumeFileInput" accept=".pdf,.docx,.txt" />
+      <div class="msg hidden" id="extractMsg"></div>
+
       <label>Your resume text</label>
       <textarea id="resumeText" rows="6" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;">${resumeText}</textarea>
 
@@ -872,6 +949,25 @@ async function renderInterview(user) {
 
   document.getElementById("backBtn").addEventListener("click", () => {
     window.location.hash = "dashboard";
+  });
+
+  document.getElementById("resumeFileInput").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const msg = document.getElementById("extractMsg");
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Reading file...";
+
+    try {
+      const text = await extractTextFromFile(file);
+      document.getElementById("resumeText").value = text;
+      msg.className = "msg success";
+      msg.textContent = "Resume text loaded. Review below, then continue.";
+    } catch (err) {
+      msg.className = "msg error";
+      msg.textContent = err.message;
+    }
   });
 
   document.getElementById("prepBtn").addEventListener("click", async () => {
@@ -1196,6 +1292,34 @@ async function renderAdmin(user) {
     </div>
   `;
 }
+
+function selectField(name, label, value, options) {
+  return `
+    <label>${label}</label>
+    <select id="${name}" name="${name}">
+      <option value="">-- Select --</option>
+      ${options.map(opt => `<option value="${opt}" ${opt === value ? "selected" : ""}>${opt}</option>`).join("")}
+    </select>
+  `;
+}
+
+const COUNTRIES = [
+  "Nigeria","Ghana","Kenya","South Africa","Egypt","United States","United Kingdom","Canada",
+  "Germany","France","Netherlands","Ireland","United Arab Emirates","Saudi Arabia","India",
+  "Australia","Remote / Any Country"
+];
+
+const WORK_AUTH_OPTIONS = [
+  "Citizen","Permanent Resident","Work Visa Holder","Requires Sponsorship","Not Applicable (Remote/Freelance)"
+];
+
+const JOB_TYPE_OPTIONS = ["Full-time","Part-time","Contract","Internship","Freelance"];
+
+const REMOTE_HYBRID_OPTIONS = ["Remote","Hybrid","Onsite","No preference"];
+
+const EXPERIENCE_LEVEL_OPTIONS = ["Entry Level","Mid-Level","Senior","Executive"];
+
+const AVAILABILITY_OPTIONS = ["Immediately","Within 2 weeks","Within 1 month","Within 3 months","Not currently looking"];
 
 function field(name, label, value, type = "text") {
   return `
