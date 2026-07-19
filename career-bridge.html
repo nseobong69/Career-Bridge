@@ -1,0 +1,1209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Career Bridge</title>
+<script src="https://js.paystack.co/v1/inline.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    margin: 0;
+    background: #f8f9fa;
+    color: #1a1a1a;
+  }
+  .container { max-width: 480px; margin: 0 auto; padding: 24px 16px; }
+  .card {
+    background: #fff;
+    border: 1px solid #e5e5e5;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 16px;
+  }
+  h1 { font-size: 24px; margin: 0 0 8px; }
+  h2 { font-size: 18px; margin: 0 0 16px; }
+  p.subtitle { color: #666; margin: 0 0 24px; }
+  label { display: block; font-size: 13px; color: #555; margin: 12px 0 4px; }
+  input, select {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    font-size: 15px;
+  }
+  button {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: #111;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    margin-top: 16px;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: #fff;
+    color: #111;
+    border: 1px solid #ccc;
+  }
+  button:disabled { opacity: 0.5; }
+  .msg { font-size: 13px; margin-top: 10px; }
+  .msg.error { color: #d33; }
+  .msg.success { color: #1a7f37; }
+  .link { text-align: center; font-size: 14px; margin-top: 16px; color: #555; }
+  .link a { color: #111; }
+  .hidden { display: none; }
+  .progress-bar {
+    background: #eee;
+    border-radius: 999px;
+    height: 10px;
+    overflow: hidden;
+    margin: 8px 0;
+  }
+  .progress-fill {
+    background: #111;
+    height: 100%;
+    transition: width 0.3s;
+  }
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .topbar button { width: auto; padding: 8px 14px; font-size: 13px; margin: 0; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .nav-tile {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+  }
+</style>
+</head>
+<body>
+
+<div class="container" id="app">Loading...</div>
+
+<script>
+// ============================================================
+// CONFIG — replace these placeholders with your real Supabase values
+// Get them from: Supabase Dashboard -> Settings -> API
+// ============================================================
+const SUPABASE_URL = "YOUR_SUPABASE_PROJECT_URL";
+const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+
+// The Edge Function URL is always your project URL + /functions/v1/<function-name>
+const TAILOR_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/tailor-resume`;
+const FETCH_JOBS_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/fetch-jobs`;
+const VERIFY_PAYMENT_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/verify-payment`;
+
+// Paystack's PUBLIC key is safe to expose in the browser — it can only
+// initiate a checkout, never move money or confirm a payment on its own.
+const PAYSTACK_PUBLIC_KEY = "YOUR_PAYSTACK_PUBLIC_KEY";
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const app = document.getElementById("app");
+
+// Simple hash-based router: #login, #signup, #dashboard, #profile
+window.addEventListener("hashchange", render);
+window.addEventListener("DOMContentLoaded", render);
+
+async function render() {
+  const { data: { user } } = await sb.auth.getUser();
+  const route = window.location.hash.replace("#", "") || (user ? "dashboard" : "login");
+
+  if (!user && (route === "dashboard" || route === "profile")) {
+    window.location.hash = "login";
+    return renderLogin();
+  }
+
+  if (route === "signup") return renderSignup();
+  if (route === "dashboard") return renderDashboard(user);
+  if (route === "profile") return renderProfile(user);
+  if (route === "match") return renderMatch(user);
+  if (route === "jobs") return renderJobs(user);
+  if (route === "tracker") return renderTracker(user);
+  if (route === "interview") return renderInterview(user);
+  if (route === "billing") return renderBilling(user);
+  if (route === "admin") return renderAdmin(user);
+  return renderLogin();
+}
+
+// ------------------------------------------------------------
+// LOGIN
+// ------------------------------------------------------------
+function renderLogin() {
+  app.innerHTML = `
+    <div class="card">
+      <h1>Career Bridge</h1>
+      <p class="subtitle">Your AI Career Copilot</p>
+      <form id="loginForm">
+        <label>Email</label>
+        <input type="email" id="email" required />
+        <label>Password</label>
+        <input type="password" id="password" required />
+        <div class="msg error hidden" id="loginMsg"></div>
+        <button type="submit" id="loginBtn">Log In</button>
+      </form>
+      <p class="link">No account? <a href="#signup">Sign up</a></p>
+    </div>
+  `;
+
+  document.getElementById("loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("loginBtn");
+    const msg = document.getElementById("loginMsg");
+    btn.disabled = true;
+    btn.textContent = "Logging in...";
+
+    const { error } = await sb.auth.signInWithPassword({
+      email: document.getElementById("email").value,
+      password: document.getElementById("password").value,
+    });
+
+    if (error) {
+      msg.textContent = error.message;
+      msg.classList.remove("hidden");
+      btn.disabled = false;
+      btn.textContent = "Log In";
+      return;
+    }
+
+    window.location.hash = "dashboard";
+    render();
+  });
+}
+
+// ------------------------------------------------------------
+// SIGNUP
+// ------------------------------------------------------------
+function renderSignup() {
+  app.innerHTML = `
+    <div class="card">
+      <h1>Create your account</h1>
+      <form id="signupForm">
+        <label>Full name</label>
+        <input type="text" id="fullName" required />
+        <label>Email</label>
+        <input type="email" id="email" required />
+        <label>Password (min 6 characters)</label>
+        <input type="password" id="password" minlength="6" required />
+        <div class="msg error hidden" id="signupMsg"></div>
+        <button type="submit" id="signupBtn">Sign Up</button>
+      </form>
+      <p class="link">Already have an account? <a href="#login">Log in</a></p>
+    </div>
+  `;
+
+  document.getElementById("signupForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("signupBtn");
+    const msg = document.getElementById("signupMsg");
+    btn.disabled = true;
+    btn.textContent = "Creating account...";
+
+    const fullName = document.getElementById("fullName").value;
+    const email = document.getElementById("email").value;
+    const password = document.getElementById("password").value;
+
+    const { data, error } = await sb.auth.signUp({
+      email,
+      password,
+      options: { data: { full_name: fullName } },
+    });
+
+    if (error) {
+      msg.textContent = error.message;
+      msg.classList.remove("hidden");
+      btn.disabled = false;
+      btn.textContent = "Sign Up";
+      return;
+    }
+
+    // Create the profile row ourselves (no server-side trigger in this version)
+    if (data.user) {
+      await sb.from("profiles").upsert({
+        id: data.user.id,
+        full_name: fullName,
+        email: email,
+      });
+    }
+
+    app.innerHTML = `
+      <div class="card">
+        <h2>Check your email</h2>
+        <p>We sent a confirmation link to <strong>${email}</strong>. Click it, then come back and log in.</p>
+        <p class="link"><a href="#login">Go to login</a></p>
+      </div>
+    `;
+  });
+}
+
+// ------------------------------------------------------------
+// DASHBOARD
+// ------------------------------------------------------------
+async function renderDashboard(user) {
+  const { data: profile } = await sb.from("profiles").select("*").eq("id", user.id).single();
+  const { data: subscription } = await sb.from("subscriptions").select("*").eq("user_id", user.id).single();
+  const pct = profile?.profile_completion_percent || 0;
+  const plan = subscription?.plan || "free";
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Hi, ${profile?.full_name || user.email}</h1>
+      <button class="secondary" id="logoutBtn">Log out</button>
+    </div>
+
+    <div class="card">
+      <h2>Profile Completion</h2>
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <p class="msg">${pct}% complete</p>
+    </div>
+
+    <a href="#billing" class="nav-tile">
+      <div class="card">
+        <h2>Plan: ${plan.charAt(0).toUpperCase() + plan.slice(1)}</h2>
+        <p class="msg">${plan === "free" ? "Upgrade for more AI credits" : "Manage your subscription"}</p>
+      </div>
+    </a>
+
+    <a href="#profile" class="nav-tile">
+      <div class="card">
+        <h2>Complete Your Profile</h2>
+        <p class="msg">Location, skills, experience, preferences, resume</p>
+      </div>
+    </a>
+
+    <a href="#match" class="nav-tile">
+      <div class="card">
+        <h2>AI Resume Match &amp; Tailor</h2>
+        <p class="msg">Paste a job description, get a match score and a tailored resume</p>
+      </div>
+    </a>
+
+    <a href="#jobs" class="nav-tile">
+      <div class="card">
+        <h2>Job Discovery</h2>
+        <p class="msg">Browse fetched jobs and see your match score for each</p>
+      </div>
+    </a>
+
+    <a href="#tracker" class="nav-tile">
+      <div class="card">
+        <h2>Application Tracker</h2>
+        <p class="msg">Track applications through Applied, Interview, Offer, Rejected</p>
+      </div>
+    </a>
+
+    <a href="#interview" class="nav-tile">
+      <div class="card">
+        <h2>Interview Prep</h2>
+        <p class="msg">Get likely questions, STAR answer guidance, and research tips for any job</p>
+      </div>
+    </a>
+
+    ${profile?.is_admin ? `
+      <a href="#admin" class="nav-tile">
+        <div class="card" style="border-color:#111;">
+          <h2>Admin Dashboard</h2>
+          <p class="msg">Users, revenue, AI usage, job stats</p>
+        </div>
+      </a>
+    ` : ''}
+  `;
+
+  document.getElementById("logoutBtn").addEventListener("click", async () => {
+    await sb.auth.signOut();
+    window.location.hash = "login";
+    render();
+  });
+}
+
+// ------------------------------------------------------------
+// PROFILE
+// ------------------------------------------------------------
+async function renderProfile(user) {
+  const { data: p } = await sb.from("profiles").select("*").eq("id", user.id).single();
+  const v = p || {};
+  const arr = (a) => (a || []).join(", ");
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Your Profile</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+
+    <div class="card">
+      <form id="profileForm">
+        ${field("full_name", "Full name", v.full_name)}
+        ${field("current_location", "Current location", v.current_location)}
+        ${field("country", "Country", v.country)}
+        ${field("state", "State", v.state)}
+        ${field("city", "City", v.city)}
+        ${field("postal_code", "Postal code", v.postal_code)}
+        ${field("nationality", "Nationality", v.nationality)}
+        ${field("work_authorization", "Work authorization", v.work_authorization)}
+        ${field("preferred_countries", "Preferred countries (comma-separated)", arr(v.preferred_countries))}
+        ${field("preferred_salary", "Preferred salary", v.preferred_salary)}
+        ${field("preferred_job_type", "Preferred job type", v.preferred_job_type)}
+        ${field("remote_or_hybrid", "Remote or hybrid", v.remote_or_hybrid)}
+        ${field("experience_level", "Experience level", v.experience_level)}
+        ${field("education", "Education", v.education)}
+        ${field("skills", "Skills (comma-separated)", arr(v.skills))}
+        ${field("languages", "Languages (comma-separated)", arr(v.languages))}
+        ${field("years_of_experience", "Years of experience", v.years_of_experience, "number")}
+        ${field("availability", "Availability", v.availability)}
+        ${field("preferred_industries", "Preferred industries (comma-separated)", arr(v.preferred_industries))}
+        ${field("preferred_roles", "Preferred roles (comma-separated)", arr(v.preferred_roles))}
+
+        <div class="msg hidden" id="saveMsg"></div>
+        <button type="submit" id="saveBtn">Save Profile</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Upload Resume</h2>
+      <input type="file" id="resumeFile" accept=".pdf,.doc,.docx" />
+      <button class="secondary" id="uploadBtn">Upload</button>
+      <div class="msg hidden" id="uploadMsg"></div>
+    </div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "dashboard";
+  });
+
+  document.getElementById("profileForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("saveBtn");
+    const msg = document.getElementById("saveMsg");
+    btn.disabled = true;
+    btn.textContent = "Saving...";
+
+    const get = (id) => document.getElementById(id).value;
+    const toArr = (s) => s.split(",").map(x => x.trim()).filter(Boolean);
+
+    const fields = {
+      full_name: get("full_name"),
+      current_location: get("current_location"),
+      country: get("country"),
+      state: get("state"),
+      city: get("city"),
+      postal_code: get("postal_code"),
+      nationality: get("nationality"),
+      work_authorization: get("work_authorization"),
+      preferred_countries: toArr(get("preferred_countries")),
+      preferred_salary: get("preferred_salary"),
+      preferred_job_type: get("preferred_job_type"),
+      remote_or_hybrid: get("remote_or_hybrid"),
+      experience_level: get("experience_level"),
+      education: get("education"),
+      skills: toArr(get("skills")),
+      languages: toArr(get("languages")),
+      years_of_experience: get("years_of_experience") ? Number(get("years_of_experience")) : null,
+      availability: get("availability"),
+      preferred_industries: toArr(get("preferred_industries")),
+      preferred_roles: toArr(get("preferred_roles")),
+    };
+
+    // Completion % = filled fields / total fields
+    const total = Object.keys(fields).length;
+    const filled = Object.values(fields).filter(x => x && (Array.isArray(x) ? x.length : String(x).trim())).length;
+    fields.profile_completion_percent = Math.round((filled / total) * 100);
+    fields.updated_at = new Date().toISOString();
+
+    const { error } = await sb.from("profiles").update(fields).eq("id", user.id);
+
+    btn.disabled = false;
+    btn.textContent = "Save Profile";
+    msg.classList.remove("hidden");
+    msg.className = error ? "msg error" : "msg success";
+    msg.textContent = error ? error.message : "Profile saved.";
+  });
+
+  document.getElementById("uploadBtn").addEventListener("click", async () => {
+    const fileInput = document.getElementById("resumeFile");
+    const msg = document.getElementById("uploadMsg");
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Uploading...";
+
+    // Stored at documents/{user_id}/resume-{filename}
+    // RLS storage policy checks that the first folder matches auth.uid()
+    const path = `${user.id}/resume-${file.name}`;
+    const { error } = await sb.storage.from("documents").upload(path, file, { upsert: true });
+
+    msg.className = error ? "msg error" : "msg success";
+    msg.textContent = error ? error.message : "Resume uploaded successfully.";
+  });
+}
+
+// ------------------------------------------------------------
+// AI MATCH & TAILOR (Phase 2)
+// ------------------------------------------------------------
+async function renderMatch(user) {
+  const { data: p } = await sb.from("profiles").select("*").eq("id", user.id).single();
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">AI Match &amp; Tailor</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+
+    <div class="card">
+      <label>Paste your resume text</label>
+      <textarea id="resumeText" rows="8" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;">${p?.resume_text || ''}</textarea>
+
+      <label>Paste the job description</label>
+      <textarea id="jobDesc" rows="8" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;"></textarea>
+
+      <button id="scoreBtn">Get Match Score</button>
+      <button class="secondary" id="tailorBtn">Tailor My Resume</button>
+      <button class="secondary" id="coverBtn">Generate Cover Letter</button>
+
+      <div class="msg hidden" id="matchMsg"></div>
+    </div>
+
+    <div class="card hidden" id="resultCard">
+      <h2 id="resultTitle">Result</h2>
+      <div id="resultBody" style="white-space:pre-wrap;font-size:14px;line-height:1.5;"></div>
+    </div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "dashboard";
+  });
+
+  async function callTailorFunction(action) {
+    const resumeText = document.getElementById("resumeText").value.trim();
+    const jobDescription = document.getElementById("jobDesc").value.trim();
+    const msg = document.getElementById("matchMsg");
+    const resultCard = document.getElementById("resultCard");
+    const resultBody = document.getElementById("resultBody");
+    const resultTitle = document.getElementById("resultTitle");
+
+    if (!resumeText || !jobDescription) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = "Please paste both your resume and the job description.";
+      return;
+    }
+
+    const usage = await checkUsageAllowed(user);
+    if (!usage.allowed) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = `You've used all ${usage.limit} AI actions on the ${usage.plan} plan this month. Upgrade on the Billing page for more.`;
+      return;
+    }
+
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Thinking... this can take a few seconds.";
+    resultCard.classList.add("hidden");
+
+    // Save resume text to profile so it's pre-filled next time
+    await sb.from("profiles").update({ resume_text: resumeText }).eq("id", user.id);
+
+    try {
+      const { data: sessionData } = await sb.auth.getSession();
+      const token = sessionData.session.access_token;
+
+      const res = await fetch(TAILOR_FUNCTION_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+          "apikey": SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ resumeText, jobDescription, action }),
+      });
+
+      const data = await res.json();
+      msg.classList.add("hidden");
+
+      if (data.error) {
+        msg.classList.remove("hidden");
+        msg.className = "msg error";
+        msg.textContent = data.error;
+        return;
+      }
+
+      await logUsage(user, action);
+
+      const titles = {
+        score: "Match Score",
+        tailor_resume: "Tailored Resume",
+        cover_letter: "Cover Letter",
+      };
+      resultTitle.textContent = titles[action] || "Result";
+
+      if (action === "score") {
+        try {
+          const parsed = JSON.parse(data.result);
+          resultBody.textContent =
+            `Overall Match: ${parsed.overall_score}%\n` +
+            `Skills Match: ${parsed.skills_match}%\n\n` +
+            `Matched Skills: ${(parsed.matched_skills || []).join(", ")}\n\n` +
+            `Missing Skills: ${(parsed.missing_skills || []).join(", ")}\n\n` +
+            `Recommendations:\n- ${(parsed.recommendations || []).join("\n- ")}`;
+        } catch {
+          resultBody.textContent = data.result;
+        }
+      } else {
+        resultBody.textContent = data.result;
+      }
+
+      resultCard.classList.remove("hidden");
+    } catch (err) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = "Something went wrong: " + err.message;
+    }
+  }
+
+  document.getElementById("scoreBtn").addEventListener("click", () => callTailorFunction("score"));
+  document.getElementById("tailorBtn").addEventListener("click", () => callTailorFunction("tailor_resume"));
+  document.getElementById("coverBtn").addEventListener("click", () => callTailorFunction("cover_letter"));
+}
+
+// ------------------------------------------------------------
+// JOB DISCOVERY (Phase 3)
+// ------------------------------------------------------------
+async function renderJobs(user) {
+  const { data: profile } = await sb.from("profiles").select("resume_text").eq("id", user.id).single();
+  const resumeText = profile?.resume_text || "";
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Job Discovery</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+
+    ${!resumeText ? `
+      <div class="card">
+        <p class="msg error">No resume text saved yet. Go to <a href="#match">AI Match &amp; Tailor</a> and paste your resume once so job scoring works.</p>
+      </div>
+    ` : ''}
+
+    <div class="card">
+      <button id="fetchBtn">Fetch Latest Jobs</button>
+      <div class="msg hidden" id="fetchMsg"></div>
+    </div>
+
+    <div class="card">
+      <label>Filter by source</label>
+      <select id="sourceFilter">
+        <option value="">All sources</option>
+        <option value="remoteok">RemoteOK</option>
+        <option value="arbeitnow">Arbeitnow</option>
+        <option value="jobicy">Jobicy</option>
+      </select>
+    </div>
+
+    <div id="jobsList"></div>
+  `;
+
+  document.getElementById("sourceFilter").addEventListener("change", () => loadJobsList());
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "dashboard";
+  });
+
+  document.getElementById("fetchBtn").addEventListener("click", async () => {
+    const btn = document.getElementById("fetchBtn");
+    const msg = document.getElementById("fetchMsg");
+    btn.disabled = true;
+    btn.textContent = "Fetching...";
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Pulling latest listings...";
+
+    try {
+      const { data: sessionData } = await sb.auth.getSession();
+      const token = sessionData.session.access_token;
+
+      const res = await fetch(FETCH_JOBS_FUNCTION_URL, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}`, "apikey": SUPABASE_ANON_KEY },
+      });
+      const data = await res.json();
+
+      msg.className = data.error ? "msg error" : "msg success";
+      msg.textContent = data.error || `Fetched ${data.fetched} across all sources, added/updated ${data.upserted}.`;
+    } catch (err) {
+      msg.className = "msg error";
+      msg.textContent = "Fetch failed: " + err.message;
+    }
+
+    btn.disabled = false;
+    btn.textContent = "Fetch Latest Jobs";
+    loadJobsList();
+  });
+
+  async function loadJobsList() {
+    const listEl = document.getElementById("jobsList");
+    listEl.innerHTML = `<p class="msg">Loading jobs...</p>`;
+
+    const selectedSource = document.getElementById("sourceFilter")?.value || "";
+
+    let query = sb.from("jobs").select("*").order("posted_at", { ascending: false }).limit(30);
+    if (selectedSource) query = query.eq("source", selectedSource);
+
+    const { data: jobs } = await query;
+
+    if (!jobs || jobs.length === 0) {
+      listEl.innerHTML = `<p class="msg">No jobs yet — tap "Fetch Latest Jobs" above.</p>`;
+      return;
+    }
+
+    const { data: matches } = await sb
+      .from("job_matches")
+      .select("*")
+      .eq("user_id", user.id);
+
+    const matchByJobId = {};
+    (matches || []).forEach(m => matchByJobId[m.job_id] = m);
+
+    listEl.innerHTML = jobs.map(job => {
+      const match = matchByJobId[job.id];
+      return `
+        <div class="card">
+          <h2 style="font-size:16px;">${job.title}</h2>
+          <p class="msg">${job.company} · ${job.location}${job.salary ? ' · ' + job.salary : ''}</p>
+          <p class="msg" style="text-transform:uppercase;font-size:11px;letter-spacing:0.5px;color:#999;">${job.source}</p>
+          ${match
+            ? `<p class="msg success">Match score: ${match.overall_score}%</p>`
+            : `<button class="secondary score-btn" data-job-id="${job.id}" ${!resumeText ? 'disabled' : ''}>Score This Job</button>`
+          }
+          <div class="msg hidden score-result" id="score-${job.id}"></div>
+          <a href="${job.url}" target="_blank" style="font-size:13px;">View original listing →</a>
+        </div>
+      `;
+    }).join("");
+
+    document.querySelectorAll(".score-btn").forEach(btn => {
+      btn.addEventListener("click", () => scoreJob(btn.dataset.jobId, jobs));
+    });
+  }
+
+  async function scoreJob(jobId, jobs) {
+    const job = jobs.find(j => j.id === jobId);
+    const resultEl = document.getElementById(`score-${jobId}`);
+    resultEl.classList.remove("hidden");
+
+    const usage = await checkUsageAllowed(user);
+    if (!usage.allowed) {
+      resultEl.textContent = `You've used all ${usage.limit} AI actions on the ${usage.plan} plan this month. Upgrade on the Billing page.`;
+      return;
+    }
+
+    resultEl.textContent = "Scoring...";
+
+    try {
+      const { data: sessionData } = await sb.auth.getSession();
+      const token = sessionData.session.access_token;
+
+      const res = await fetch(TAILOR_FUNCTION_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+          "apikey": SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({
+          resumeText,
+          jobDescription: job.description,
+          action: "score",
+        }),
+      });
+      const data = await res.json();
+      const parsed = JSON.parse(data.result);
+
+      await sb.from("job_matches").upsert({
+        user_id: user.id,
+        job_id: jobId,
+        overall_score: parsed.overall_score,
+        skills_match: parsed.skills_match,
+        missing_skills: parsed.missing_skills,
+        matched_skills: parsed.matched_skills,
+      });
+
+      await logUsage(user, "score");
+
+      loadJobsList();
+    } catch (err) {
+      resultEl.textContent = "Scoring failed: " + err.message;
+    }
+  }
+
+  loadJobsList();
+}
+
+// ------------------------------------------------------------
+// APPLICATION TRACKER (Phase 4)
+// ------------------------------------------------------------
+async function renderTracker(user) {
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Application Tracker</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+    <div id="trackerBody"><p class="msg">Loading...</p></div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "dashboard";
+  });
+
+  const STATUSES = [
+    { key: "new", label: "New / Scored" },
+    { key: "applied", label: "Applied" },
+    { key: "interview", label: "Interview" },
+    { key: "offer", label: "Offer" },
+    { key: "rejected", label: "Rejected" },
+  ];
+
+  const { data: matches } = await sb
+    .from("job_matches")
+    .select("*, jobs(title, company, location, url)")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
+
+  const body = document.getElementById("trackerBody");
+
+  if (!matches || matches.length === 0) {
+    body.innerHTML = `<div class="card"><p class="msg">No tracked applications yet. Score some jobs in <a href="#jobs">Job Discovery</a> first.</p></div>`;
+    return;
+  }
+
+  body.innerHTML = STATUSES.map(s => {
+    const items = matches.filter(m => (m.status || "new") === s.key);
+    if (items.length === 0) return "";
+
+    return `
+      <h2 style="font-size:15px;margin:20px 0 8px;color:#555;">${s.label} (${items.length})</h2>
+      ${items.map(m => `
+        <div class="card">
+          <h2 style="font-size:16px;">${m.jobs?.title || "Untitled"}</h2>
+          <p class="msg">${m.jobs?.company || ""} · ${m.jobs?.location || ""}</p>
+          <p class="msg">Match: ${m.overall_score ?? "—"}%</p>
+
+          <label>Status</label>
+          <select class="status-select" data-match-id="${m.id}">
+            ${STATUSES.map(opt => `<option value="${opt.key}" ${opt.key === (m.status || "new") ? "selected" : ""}>${opt.label}</option>`).join("")}
+          </select>
+
+          <label>Follow-up date</label>
+          <input type="date" class="followup-input" data-match-id="${m.id}" value="${m.follow_up_date || ""}" />
+
+          <label>Notes</label>
+          <input type="text" class="notes-input" data-match-id="${m.id}" value="${m.notes ? m.notes.replace(/"/g, '&quot;') : ''}" placeholder="Recruiter name, interview details, etc." />
+
+          <button class="secondary save-tracker-btn" data-match-id="${m.id}" style="margin-top:10px;">Save</button>
+          <div class="msg hidden" id="trackerMsg-${m.id}"></div>
+
+          ${m.jobs?.url ? `<a href="${m.jobs.url}" target="_blank" style="font-size:13px;display:block;margin-top:8px;">View original listing →</a>` : ""}
+        </div>
+      `).join("")}
+    `;
+  }).join("");
+
+  document.querySelectorAll(".save-tracker-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.matchId;
+      const status = document.querySelector(`.status-select[data-match-id="${id}"]`).value;
+      const followUp = document.querySelector(`.followup-input[data-match-id="${id}"]`).value;
+      const notes = document.querySelector(`.notes-input[data-match-id="${id}"]`).value;
+      const msg = document.getElementById(`trackerMsg-${id}`);
+
+      const updates = {
+        status,
+        notes,
+        follow_up_date: followUp || null,
+      };
+      if (status === "applied") updates.applied_at = new Date().toISOString();
+
+      const { error } = await sb.from("job_matches").update(updates).eq("id", id);
+
+      msg.classList.remove("hidden");
+      msg.className = error ? "msg error" : "msg success";
+      msg.textContent = error ? error.message : "Saved.";
+
+      if (!error) setTimeout(() => renderTracker(user), 500);
+    });
+  });
+}
+
+// ------------------------------------------------------------
+// INTERVIEW PREP (Phase 5)
+// ------------------------------------------------------------
+async function renderInterview(user) {
+  const { data: profile } = await sb.from("profiles").select("resume_text").eq("id", user.id).single();
+  const resumeText = profile?.resume_text || "";
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Interview Prep</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+
+    <div class="card">
+      <label>Your resume text</label>
+      <textarea id="resumeText" rows="6" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;">${resumeText}</textarea>
+
+      <label>Job description you're interviewing for</label>
+      <textarea id="jobDesc" rows="6" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;"></textarea>
+
+      <button id="prepBtn">Generate Interview Prep</button>
+      <div class="msg hidden" id="prepMsg"></div>
+    </div>
+
+    <div id="prepResults"></div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "dashboard";
+  });
+
+  document.getElementById("prepBtn").addEventListener("click", async () => {
+    const resume = document.getElementById("resumeText").value.trim();
+    const jobDescription = document.getElementById("jobDesc").value.trim();
+    const btn = document.getElementById("prepBtn");
+    const msg = document.getElementById("prepMsg");
+    const results = document.getElementById("prepResults");
+
+    if (!resume || !jobDescription) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = "Please paste both your resume and the job description.";
+      return;
+    }
+
+    const usage = await checkUsageAllowed(user);
+    if (!usage.allowed) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = `You've used all ${usage.limit} AI actions on the ${usage.plan} plan this month. Upgrade on the Billing page for more.`;
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "Preparing...";
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Generating your interview prep — this can take a few seconds.";
+    results.innerHTML = "";
+
+    await sb.from("profiles").update({ resume_text: resume }).eq("id", user.id);
+
+    try {
+      const { data: sessionData } = await sb.auth.getSession();
+      const token = sessionData.session.access_token;
+
+      const res = await fetch(TAILOR_FUNCTION_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+          "apikey": SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ resumeText: resume, jobDescription, action: "interview_prep" }),
+      });
+
+      const data = await res.json();
+      msg.classList.add("hidden");
+
+      if (data.error) {
+        msg.classList.remove("hidden");
+        msg.className = "msg error";
+        msg.textContent = data.error;
+        return;
+      }
+
+      const prep = JSON.parse(data.result);
+
+      await logUsage(user, "interview_prep");
+
+      results.innerHTML = `
+        ${prepSection("Likely Questions", prep.likely_questions)}
+        ${prepSection("Technical Questions", prep.technical_questions)}
+        ${prepSection("Behavioral Questions", prep.behavioral_questions)}
+        ${prepStarSection(prep.star_examples)}
+        ${prepSection("Company Research Tips", prep.company_research_tips)}
+        ${prepSection("Questions To Ask Your Interviewer", prep.questions_to_ask_interviewer)}
+      `;
+    } catch (err) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = "Something went wrong: " + err.message;
+    }
+
+    btn.disabled = false;
+    btn.textContent = "Generate Interview Prep";
+  });
+}
+
+function prepSection(title, items) {
+  if (!items || items.length === 0) return "";
+  return `
+    <div class="card">
+      <h2 style="font-size:16px;">${title}</h2>
+      <ul style="margin:0;padding-left:20px;font-size:14px;line-height:1.6;">
+        ${items.map(i => `<li>${i}</li>`).join("")}
+      </ul>
+    </div>
+  `;
+}
+
+function prepStarSection(examples) {
+  if (!examples || examples.length === 0) return "";
+  return `
+    <div class="card">
+      <h2 style="font-size:16px;">STAR Answer Guidance</h2>
+      ${examples.map(ex => `
+        <p style="font-size:14px;margin:0 0 4px;"><strong>${ex.question}</strong></p>
+        <p style="font-size:14px;color:#555;margin:0 0 14px;">${ex.suggested_approach}</p>
+      `).join("")}
+    </div>
+  `;
+}
+
+// ------------------------------------------------------------
+// BILLING (Phase 6)
+// ------------------------------------------------------------
+const PLAN_LIMITS = {
+  free: 5,
+  basic: 50,
+  pro: 200,
+  premium: Infinity,
+};
+
+const PLANS = [
+  { key: "basic", label: "Basic", price: 5000, amountKobo: 500000, credits: 50 },
+  { key: "pro", label: "Pro", price: 15000, amountKobo: 1500000, credits: 200 },
+  { key: "premium", label: "Premium", price: 30000, amountKobo: 3000000, credits: "Unlimited" },
+];
+
+// Call this before any AI action (score, tailor, cover letter, interview prep)
+// to enforce the free/basic plan's monthly credit limit.
+async function checkUsageAllowed(user) {
+  const { data: subscription } = await sb.from("subscriptions").select("plan").eq("user_id", user.id).single();
+  const plan = subscription?.plan || "free";
+  const limit = PLAN_LIMITS[plan] ?? PLAN_LIMITS.free;
+
+  if (limit === Infinity) return { allowed: true };
+
+  const startOfMonth = new Date();
+  startOfMonth.setDate(1);
+  startOfMonth.setHours(0, 0, 0, 0);
+
+  const { count } = await sb
+    .from("ai_usage_log")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", user.id)
+    .gte("created_at", startOfMonth.toISOString());
+
+  if ((count || 0) >= limit) {
+    return { allowed: false, plan, limit, used: count };
+  }
+  return { allowed: true, plan, limit, used: count };
+}
+
+async function logUsage(user, action) {
+  await sb.from("ai_usage_log").insert({ user_id: user.id, action });
+}
+
+async function renderBilling(user) {
+  const { data: subscription } = await sb.from("subscriptions").select("*").eq("user_id", user.id).single();
+  const currentPlan = subscription?.plan || "free";
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Billing</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+
+    <div class="card">
+      <h2>Current Plan: ${currentPlan.charAt(0).toUpperCase() + currentPlan.slice(1)}</h2>
+      <p class="msg">${subscription?.current_period_end ? "Renews " + new Date(subscription.current_period_end).toLocaleDateString() : "Free plan — 5 AI actions per month"}</p>
+    </div>
+
+    ${PLANS.map(p => `
+      <div class="card">
+        <h2>${p.label} — ₦${p.price.toLocaleString()}/month</h2>
+        <p class="msg">${p.credits} AI actions per month</p>
+        <button class="upgrade-btn" data-plan="${p.key}" data-amount="${p.amountKobo}" ${currentPlan === p.key ? "disabled" : ""}>
+          ${currentPlan === p.key ? "Current Plan" : "Upgrade"}
+        </button>
+      </div>
+    `).join("")}
+
+    <div class="msg hidden" id="billingMsg"></div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "dashboard";
+  });
+
+  document.querySelectorAll(".upgrade-btn").forEach(btn => {
+    btn.addEventListener("click", () => startCheckout(btn.dataset.amount));
+  });
+
+  function startCheckout(amountKobo) {
+    const handler = PaystackPop.setup({
+      key: PAYSTACK_PUBLIC_KEY,
+      email: user.email,
+      amount: Number(amountKobo),
+      currency: "NGN",
+      ref: "cb_" + Date.now(),
+      callback: function (response) {
+        verifyPayment(response.reference);
+      },
+      onClose: function () {},
+    });
+    handler.openIframe();
+  }
+
+  async function verifyPayment(reference) {
+    const msg = document.getElementById("billingMsg");
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Verifying payment...";
+
+    try {
+      const { data: sessionData } = await sb.auth.getSession();
+      const token = sessionData.session.access_token;
+
+      const res = await fetch(VERIFY_PAYMENT_FUNCTION_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+          "apikey": SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ reference }),
+      });
+      const data = await res.json();
+
+      if (data.error) {
+        msg.className = "msg error";
+        msg.textContent = data.error;
+        return;
+      }
+
+      msg.className = "msg success";
+      msg.textContent = `Upgraded to ${data.plan}!`;
+      setTimeout(() => renderBilling(user), 1000);
+    } catch (err) {
+      msg.className = "msg error";
+      msg.textContent = "Verification failed: " + err.message;
+    }
+  }
+}
+
+// ------------------------------------------------------------
+// ADMIN DASHBOARD (Phase 8)
+// ------------------------------------------------------------
+async function renderAdmin(user) {
+  const { data: profile } = await sb.from("profiles").select("is_admin").eq("id", user.id).single();
+
+  if (!profile?.is_admin) {
+    app.innerHTML = `
+      <div class="card">
+        <h2>Not authorized</h2>
+        <p class="msg">This page is restricted to admin accounts.</p>
+        <p class="link"><a href="#dashboard">Back to dashboard</a></p>
+      </div>
+    `;
+    return;
+  }
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Admin Dashboard</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+    <div id="adminBody"><p class="msg">Loading stats...</p></div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "dashboard";
+  });
+
+  const body = document.getElementById("adminBody");
+
+  // Run all the stat queries in parallel
+  const [
+    { count: totalUsers },
+    { data: subs },
+    { data: payments },
+    { count: totalJobs },
+    { data: usage },
+  ] = await Promise.all([
+    sb.from("profiles").select("*", { count: "exact", head: true }),
+    sb.from("subscriptions").select("plan, status"),
+    sb.from("payments").select("amount_kobo, created_at").eq("status", "success"),
+    sb.from("jobs").select("*", { count: "exact", head: true }),
+    sb.from("ai_usage_log").select("action, created_at"),
+  ]);
+
+  const planCounts = {};
+  (subs || []).forEach(s => {
+    planCounts[s.plan] = (planCounts[s.plan] || 0) + 1;
+  });
+
+  const totalRevenueNaira = (payments || []).reduce((sum, p) => sum + (p.amount_kobo || 0), 0) / 100;
+
+  const startOfMonth = new Date();
+  startOfMonth.setDate(1);
+  startOfMonth.setHours(0, 0, 0, 0);
+  const revenueThisMonth = (payments || [])
+    .filter(p => new Date(p.created_at) >= startOfMonth)
+    .reduce((sum, p) => sum + (p.amount_kobo || 0), 0) / 100;
+
+  const usageThisMonth = (usage || []).filter(u => new Date(u.created_at) >= startOfMonth).length;
+  const usageByAction = {};
+  (usage || []).forEach(u => {
+    usageByAction[u.action] = (usageByAction[u.action] || 0) + 1;
+  });
+
+  body.innerHTML = `
+    <div class="grid-2">
+      <div class="card"><h2 style="font-size:14px;color:#666;">Total Users</h2><p style="font-size:28px;font-weight:700;margin:0;">${totalUsers || 0}</p></div>
+      <div class="card"><h2 style="font-size:14px;color:#666;">Total Jobs Indexed</h2><p style="font-size:28px;font-weight:700;margin:0;">${totalJobs || 0}</p></div>
+      <div class="card"><h2 style="font-size:14px;color:#666;">Total Revenue</h2><p style="font-size:28px;font-weight:700;margin:0;">₦${totalRevenueNaira.toLocaleString()}</p></div>
+      <div class="card"><h2 style="font-size:14px;color:#666;">Revenue This Month</h2><p style="font-size:28px;font-weight:700;margin:0;">₦${revenueThisMonth.toLocaleString()}</p></div>
+    </div>
+
+    <div class="card">
+      <h2>Plan Breakdown</h2>
+      ${Object.entries(planCounts).map(([plan, count]) => `<p class="msg">${plan}: ${count}</p>`).join("") || '<p class="msg">No subscriptions yet</p>'}
+    </div>
+
+    <div class="card">
+      <h2>AI Usage This Month</h2>
+      <p class="msg">Total actions: ${usageThisMonth}</p>
+      ${Object.entries(usageByAction).map(([action, count]) => `<p class="msg">${action}: ${count}</p>`).join("")}
+    </div>
+  `;
+}
+
+function field(name, label, value, type = "text") {
+  return `
+    <label>${label}</label>
+    <input type="${type}" id="${name}" value="${value != null ? value : ''}" />
+  `;
+}
+</script>
+
+</body>
+</html>
