@@ -107,7 +107,33 @@ const VERIFY_PAYMENT_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/verify-payment
 // initiate a checkout, never move money or confirm a payment on its own.
 const PAYSTACK_PUBLIC_KEY = "YOUR_PAYSTACK_PUBLIC_KEY";
 
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Custom storage adapter so "Remember me" actually does something:
+// - Checked (default): session survives closing the browser (localStorage)
+// - Unchecked: session only lasts for this tab (sessionStorage) — closing
+//   the browser logs the person out
+// The 'cb_remember' flag is checked live on every write, so toggling the
+// checkbox takes effect on the very next login without reloading the page.
+const rememberAwareStorage = {
+  getItem: (key) => localStorage.getItem(key) || sessionStorage.getItem(key),
+  setItem: (key, value) => {
+    const remember = localStorage.getItem("cb_remember") !== "false";
+    if (remember) {
+      localStorage.setItem(key, value);
+      sessionStorage.removeItem(key);
+    } else {
+      sessionStorage.setItem(key, value);
+      localStorage.removeItem(key);
+    }
+  },
+  removeItem: (key) => {
+    localStorage.removeItem(key);
+    sessionStorage.removeItem(key);
+  },
+};
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { storage: rememberAwareStorage },
+});
 
 // Reads a PDF or DOCX file the user uploaded and returns its plain text,
 // so it can be dropped into the resume textarea without leaving the app.
@@ -148,6 +174,16 @@ const app = document.getElementById("app");
 window.addEventListener("hashchange", render);
 window.addEventListener("DOMContentLoaded", render);
 
+// Supabase fires this when someone arrives via a password-reset email link.
+// We force them to the reset screen regardless of whatever hash was in the
+// URL, since the recovery token itself is what matters, not the route.
+sb.auth.onAuthStateChange((event) => {
+  if (event === "PASSWORD_RECOVERY") {
+    window.location.hash = "reset-password";
+    render();
+  }
+});
+
 async function render() {
   const { data: { user } } = await sb.auth.getUser();
   const route = window.location.hash.replace("#", "") || (user ? "dashboard" : "login");
@@ -158,10 +194,13 @@ async function render() {
   }
 
   if (route === "signup") return renderSignup();
+  if (route === "forgot-password") return renderForgotPassword();
+  if (route === "reset-password") return renderResetPassword();
   if (route === "dashboard") return renderDashboard(user);
   if (route === "profile") return renderProfile(user);
   if (route === "match") return renderMatch(user);
   if (route === "jobs") return renderJobs(user);
+  if (route === "queue") return renderQueue(user);
   if (route === "tracker") return renderTracker(user);
   if (route === "interview") return renderInterview(user);
   if (route === "billing") return renderBilling(user);
@@ -181,13 +220,30 @@ function renderLogin() {
         <label>Email</label>
         <input type="email" id="email" required />
         <label>Password</label>
-        <input type="password" id="password" required />
+        <div style="position:relative;">
+          <input type="password" id="password" required style="padding-right:44px;" />
+          <button type="button" id="togglePassword" style="position:absolute;right:6px;top:6px;width:auto;margin:0;padding:6px 10px;font-size:12px;background:#f0f0f0;color:#111;">Show</button>
+        </div>
+
+        <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
+          <input type="checkbox" id="rememberMe" checked style="width:auto;" />
+          <span style="font-size:14px;color:#555;">Remember me</span>
+        </label>
+
         <div class="msg error hidden" id="loginMsg"></div>
         <button type="submit" id="loginBtn">Log In</button>
       </form>
+      <p class="link"><a href="#forgot-password">Forgot password?</a></p>
       <p class="link">No account? <a href="#signup">Sign up</a></p>
     </div>
   `;
+
+  document.getElementById("togglePassword").addEventListener("click", (e) => {
+    const pwInput = document.getElementById("password");
+    const isHidden = pwInput.type === "password";
+    pwInput.type = isHidden ? "text" : "password";
+    e.target.textContent = isHidden ? "Hide" : "Show";
+  });
 
   document.getElementById("loginForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -195,6 +251,11 @@ function renderLogin() {
     const msg = document.getElementById("loginMsg");
     btn.disabled = true;
     btn.textContent = "Logging in...";
+
+    // Set the remember-me preference BEFORE signing in, so the session
+    // gets written to the right storage (localStorage vs sessionStorage).
+    const remember = document.getElementById("rememberMe").checked;
+    localStorage.setItem("cb_remember", remember ? "true" : "false");
 
     const { error } = await sb.auth.signInWithPassword({
       email: document.getElementById("email").value,
@@ -227,13 +288,23 @@ function renderSignup() {
         <label>Email</label>
         <input type="email" id="email" required />
         <label>Password (min 6 characters)</label>
-        <input type="password" id="password" minlength="6" required />
+        <div style="position:relative;">
+          <input type="password" id="password" minlength="6" required style="padding-right:44px;" />
+          <button type="button" id="togglePassword" style="position:absolute;right:6px;top:6px;width:auto;margin:0;padding:6px 10px;font-size:12px;background:#f0f0f0;color:#111;">Show</button>
+        </div>
         <div class="msg error hidden" id="signupMsg"></div>
         <button type="submit" id="signupBtn">Sign Up</button>
       </form>
       <p class="link">Already have an account? <a href="#login">Log in</a></p>
     </div>
   `;
+
+  document.getElementById("togglePassword").addEventListener("click", (e) => {
+    const pwInput = document.getElementById("password");
+    const isHidden = pwInput.type === "password";
+    pwInput.type = isHidden ? "text" : "password";
+    e.target.textContent = isHidden ? "Hide" : "Show";
+  });
 
   document.getElementById("signupForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -276,6 +347,108 @@ function renderSignup() {
         <p class="link"><a href="#login">Go to login</a></p>
       </div>
     `;
+  });
+}
+
+// ------------------------------------------------------------
+// FORGOT PASSWORD
+// ------------------------------------------------------------
+function renderForgotPassword() {
+  app.innerHTML = `
+    <div class="card">
+      <h1>Reset your password</h1>
+      <p class="subtitle">We'll email you a link to set a new one.</p>
+      <form id="forgotForm">
+        <label>Email</label>
+        <input type="email" id="email" required />
+        <div class="msg hidden" id="forgotMsg"></div>
+        <button type="submit" id="forgotBtn">Send Reset Link</button>
+      </form>
+      <p class="link"><a href="#login">Back to login</a></p>
+    </div>
+  `;
+
+  document.getElementById("forgotForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("forgotBtn");
+    const msg = document.getElementById("forgotMsg");
+    btn.disabled = true;
+    btn.textContent = "Sending...";
+
+    const email = document.getElementById("email").value;
+
+    // redirectTo tells Supabase where to send the person after they click
+    // the emailed link — it lands here with a recovery session active,
+    // which renderResetPassword below uses to let them set a new password.
+    const { error } = await sb.auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}${window.location.pathname}#reset-password`,
+    });
+
+    msg.classList.remove("hidden");
+    if (error) {
+      msg.className = "msg error";
+      msg.textContent = error.message;
+      btn.disabled = false;
+      btn.textContent = "Send Reset Link";
+    } else {
+      msg.className = "msg success";
+      msg.textContent = `If an account exists for ${email}, a reset link has been sent. Check your inbox.`;
+      btn.textContent = "Link Sent";
+    }
+  });
+}
+
+// ------------------------------------------------------------
+// RESET PASSWORD (landed here from the emailed link)
+// ------------------------------------------------------------
+function renderResetPassword() {
+  app.innerHTML = `
+    <div class="card">
+      <h1>Set a new password</h1>
+      <form id="resetForm">
+        <label>New password (min 6 characters)</label>
+        <div style="position:relative;">
+          <input type="password" id="newPassword" minlength="6" required style="padding-right:44px;" />
+          <button type="button" id="togglePassword" style="position:absolute;right:6px;top:6px;width:auto;margin:0;padding:6px 10px;font-size:12px;background:#f0f0f0;color:#111;">Show</button>
+        </div>
+        <div class="msg hidden" id="resetMsg"></div>
+        <button type="submit" id="resetBtn">Update Password</button>
+      </form>
+    </div>
+  `;
+
+  document.getElementById("togglePassword").addEventListener("click", (e) => {
+    const pwInput = document.getElementById("newPassword");
+    const isHidden = pwInput.type === "password";
+    pwInput.type = isHidden ? "text" : "password";
+    e.target.textContent = isHidden ? "Hide" : "Show";
+  });
+
+  document.getElementById("resetForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("resetBtn");
+    const msg = document.getElementById("resetMsg");
+    btn.disabled = true;
+    btn.textContent = "Updating...";
+
+    const { error } = await sb.auth.updateUser({
+      password: document.getElementById("newPassword").value,
+    });
+
+    msg.classList.remove("hidden");
+    if (error) {
+      msg.className = "msg error";
+      msg.textContent = error.message;
+      btn.disabled = false;
+      btn.textContent = "Update Password";
+    } else {
+      msg.className = "msg success";
+      msg.textContent = "Password updated! Redirecting to your dashboard...";
+      setTimeout(() => {
+        window.location.hash = "dashboard";
+        render();
+      }, 1500);
+    }
   });
 }
 
@@ -325,6 +498,13 @@ async function renderDashboard(user) {
       <div class="card">
         <h2>Job Discovery</h2>
         <p class="msg">Browse fetched jobs and see your match score for each</p>
+      </div>
+    </a>
+
+    <a href="#queue" class="nav-tile">
+      <div class="card">
+        <h2>Application Queue</h2>
+        <p class="msg">Ready-to-submit resumes, cover letters &amp; answers for your top jobs</p>
       </div>
     </a>
 
@@ -798,7 +978,12 @@ async function renderJobs(user) {
           <p class="msg">${job.company} · ${job.location}${job.salary ? ' · ' + job.salary : ''}</p>
           <p class="msg" style="text-transform:uppercase;font-size:11px;letter-spacing:0.5px;color:#999;">${job.source}</p>
           ${match
-            ? `<p class="msg success">Match score: ${match.overall_score}%</p>`
+            ? `<p class="msg success">Match score: ${match.overall_score}%</p>
+               ${match.prepared_at
+                 ? `<p class="msg success">✓ Application prepared</p><a href="#queue" style="font-size:13px;">View in Application Queue →</a>`
+                 : `<button class="secondary prepare-btn" data-job-id="${job.id}">Prepare Full Application</button>`
+               }
+               <div class="msg hidden prepare-result" id="prepare-${job.id}"></div>`
             : `<button class="secondary score-btn" data-job-id="${job.id}" ${!resumeText ? 'disabled' : ''}>Score This Job</button>`
           }
           <div class="msg hidden score-result" id="score-${job.id}"></div>
@@ -809,6 +994,10 @@ async function renderJobs(user) {
 
     document.querySelectorAll(".score-btn").forEach(btn => {
       btn.addEventListener("click", () => scoreJob(btn.dataset.jobId, allLoadedJobs));
+    });
+
+    document.querySelectorAll(".prepare-btn").forEach(btn => {
+      btn.addEventListener("click", () => prepareApplication(btn.dataset.jobId, allLoadedJobs));
     });
 
     // Show "Load More" only if this page came back full (more may exist)
@@ -865,15 +1054,163 @@ async function renderJobs(user) {
         matched_skills: parsed.matched_skills,
       });
 
-      await logUsage(user, "score");
-
+      resultEl.className = "msg success";
+      resultEl.textContent = `Match score: ${parsed.overall_score}%`;
       loadJobsList(false);
     } catch (err) {
+      resultEl.className = "msg error";
       resultEl.textContent = "Scoring failed: " + err.message;
     }
   }
 
+  // Calls Groq three times (tailored resume, cover letter, application
+  // answers) for one job and saves everything together, so the Application
+  // Queue can show a fully ready-to-submit package in one place.
+  async function prepareApplication(jobId, jobs) {
+    const job = jobs.find(j => j.id === jobId);
+    const resultEl = document.getElementById(`prepare-${jobId}`);
+    resultEl.classList.remove("hidden");
+
+    const usage = await checkUsageAllowed(user);
+    if (!usage.allowed) {
+      resultEl.className = "msg error";
+      resultEl.textContent = `You've used all ${usage.limit} AI actions on the ${usage.plan} plan this month. Preparing a full application uses 3 actions. Upgrade on the Billing page.`;
+      return;
+    }
+    // Preparing a full application costs 3 credits (resume + cover letter + answers).
+    // Warn up front if there isn't enough room left this month, rather than
+    // failing partway through and leaving a half-prepared application.
+    if (usage.limit !== undefined && (usage.used ?? 0) + 3 > usage.limit) {
+      resultEl.className = "msg error";
+      resultEl.textContent = `Preparing a full application uses 3 AI actions, but you only have ${usage.limit - (usage.used ?? 0)} left this month. Upgrade on the Billing page, or use individual actions instead.`;
+      return;
+    }
+
+    resultEl.className = "msg";
+    resultEl.textContent = "Preparing tailored resume...";
+
+    try {
+      const { data: sessionData } = await sb.auth.getSession();
+      const token = sessionData.session.access_token;
+
+      async function callAI(action) {
+        const res = await fetch(TAILOR_FUNCTION_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+            "apikey": SUPABASE_ANON_KEY,
+          },
+          body: JSON.stringify({ resumeText, jobDescription: job.description, action }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        return data.result;
+      }
+
+      const tailoredResume = await callAI("tailor_resume");
+      await logUsage(user, "tailor_resume");
+
+      resultEl.textContent = "Writing cover letter...";
+      const coverLetter = await callAI("cover_letter");
+      await logUsage(user, "cover_letter");
+
+      resultEl.textContent = "Drafting application answers...";
+      const answersRaw = await callAI("application_answers");
+      await logUsage(user, "application_answers");
+
+      await sb.from("job_matches").update({
+        tailored_resume: tailoredResume,
+        cover_letter: coverLetter,
+        application_answers: answersRaw,
+        prepared_at: new Date().toISOString(),
+      }).eq("user_id", user.id).eq("job_id", jobId);
+
+      resultEl.className = "msg success";
+      resultEl.textContent = "Application prepared! View it in your Application Queue.";
+      loadJobsList(false);
+    } catch (err) {
+      resultEl.className = "msg error";
+      resultEl.textContent = "Preparation failed: " + err.message;
+    }
+  }
+
   loadJobsList(false);
+}
+
+// ------------------------------------------------------------
+// APPLICATION QUEUE
+// ------------------------------------------------------------
+async function renderQueue(user) {
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Application Queue</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+    <div id="queueBody"><p class="msg">Loading...</p></div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "dashboard";
+  });
+
+  const { data: matches } = await sb
+    .from("job_matches")
+    .select("*, jobs(title, company, location, url)")
+    .eq("user_id", user.id)
+    .not("prepared_at", "is", null)
+    .order("prepared_at", { ascending: false });
+
+  const body = document.getElementById("queueBody");
+
+  if (!matches || matches.length === 0) {
+    body.innerHTML = `
+      <div class="card">
+        <p class="msg">No applications prepared yet. Go to <a href="#jobs">Job Discovery</a>, score a job, then tap "Prepare Full Application" to build a ready-to-submit package.</p>
+      </div>
+    `;
+    return;
+  }
+
+  body.innerHTML = matches.map(m => {
+    let answers = {};
+    try { answers = JSON.parse(m.application_answers); } catch {}
+
+    return `
+      <div class="card">
+        <h2 style="font-size:16px;">${m.jobs?.title || "Untitled"}</h2>
+        <p class="msg">${m.jobs?.company || ""} · ${m.jobs?.location || ""}</p>
+        <p class="msg">Match score: ${m.overall_score ?? "—"}%</p>
+
+        <details style="margin-top:10px;">
+          <summary style="cursor:pointer;font-size:14px;font-weight:600;">Tailored Resume</summary>
+          <p style="white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:8px;">${m.tailored_resume || ''}</p>
+        </details>
+
+        <details style="margin-top:10px;">
+          <summary style="cursor:pointer;font-size:14px;font-weight:600;">Cover Letter</summary>
+          <p style="white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:8px;">${m.cover_letter || ''}</p>
+        </details>
+
+        <details style="margin-top:10px;">
+          <summary style="cursor:pointer;font-size:14px;font-weight:600;">Application Answers</summary>
+          <div style="font-size:13px;line-height:1.5;margin-top:8px;">
+            ${answers.why_interested ? `<p><strong>Why interested:</strong> ${answers.why_interested}</p>` : ''}
+            ${answers.why_good_fit ? `<p><strong>Why a good fit:</strong> ${answers.why_good_fit}</p>` : ''}
+            ${answers.greatest_strength ? `<p><strong>Greatest strength:</strong> ${answers.greatest_strength}</p>` : ''}
+            ${answers.biggest_achievement ? `<p><strong>Biggest achievement:</strong> ${answers.biggest_achievement}</p>` : ''}
+            ${answers.salary_expectations ? `<p><strong>Salary expectations:</strong> ${answers.salary_expectations}</p>` : ''}
+            ${answers.availability_start_date ? `<p><strong>Availability:</strong> ${answers.availability_start_date}</p>` : ''}
+            ${answers.additional_notes ? `<p><strong>Additional notes:</strong> ${answers.additional_notes}</p>` : ''}
+          </div>
+        </details>
+
+        <a href="${m.jobs?.url}" target="_blank" style="font-size:13px;display:block;margin-top:12px;">
+          <button style="margin-top:0;">Open Original Listing & Apply →</button>
+        </a>
+      </div>
+    `;
+  }).join("");
 }
 
 // ------------------------------------------------------------
