@@ -8,6 +8,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap');
 
@@ -183,10 +184,23 @@ const SUPABASE_ANON_KEY = "sb_publishable_D-_pOmWv7DvL0OoDOMTzZA_g4PBTvIt";
 const TAILOR_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/tailor-resume`;
 const FETCH_JOBS_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/fetch-jobs`;
 const VERIFY_PAYMENT_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/verify-payment`;
+const CLOUDINARY_SIGN_FUNCTION_URL = `${SUPABASE_URL}/functions/v1/cloudinary-sign`;
 
 // Paystack's PUBLIC key is safe to expose in the browser — it can only
 // initiate a checkout, never move money or confirm a payment on its own.
 const PAYSTACK_PUBLIC_KEY = "YOUR_PAYSTACK_PUBLIC_KEY";
+
+// ============================================================
+// CLOUDINARY — stores the original resume file (PDF/DOCX) so it can be
+// downloaded or re-attached later, separate from the extracted plain text
+// used for AI matching/tailoring.
+// Uses SIGNED uploads: the cloud name, API key, and signature all come
+// from the cloudinary-sign Edge Function (which holds the API secret
+// server-side). No Cloudinary credentials live in this file at all —
+// see the cloudinary-sign function's own setup instructions for the
+// three secrets it needs (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY,
+// CLOUDINARY_API_SECRET).
+// ============================================================
 
 // Custom storage adapter so "Remember me" actually does something:
 // - Checked (default): session survives closing the browser (localStorage)
@@ -247,6 +261,77 @@ async function extractTextFromFile(file) {
 
   // Fallback: plain text file
   return await file.text();
+}
+
+// Uploads the original resume file (PDF/DOCX/etc) to Cloudinary so it's
+// kept as a real, downloadable file — separate from the plain text pulled
+// out by extractTextFromFile() for AI matching. Uses Cloudinary's "raw"
+// resource type since resumes aren't images.
+//
+// SIGNED upload: first asks the cloudinary-sign Edge Function for a
+// timestamp + signature (that function holds the Cloudinary API secret,
+// which must never touch the browser), then uploads directly to
+// Cloudinary using those. Requires the user to be logged in — the Edge
+// Function checks their Supabase session before signing anything.
+async function uploadResumeToCloudinary(file, userId) {
+  const { data: sessionData } = await sb.auth.getSession();
+  const token = sessionData?.session?.access_token;
+  if (!token) {
+    throw new Error("You need to be logged in to upload a resume.");
+  }
+
+  // Step 1: get a signature for this specific upload from our own backend.
+  const signRes = await fetch(CLOUDINARY_SIGN_FUNCTION_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "apikey": SUPABASE_ANON_KEY,
+    },
+  });
+
+  if (!signRes.ok) {
+    const errBody = await signRes.text().catch(() => "");
+    throw new Error(`Could not get upload signature: ${signRes.status} ${errBody}`);
+  }
+
+  const { signature, timestamp, folder, upload_preset, api_key, cloud_name } = await signRes.json();
+
+  if (!cloud_name || !api_key) {
+    // The Edge Function's own Cloudinary secrets aren't configured yet —
+    // fail quietly so text extraction still works without breaking the
+    // upload flow for people who haven't finished setup.
+    return null;
+  }
+
+  // Step 2: upload straight to Cloudinary using that signature. Only the
+  // params that were actually signed (timestamp, folder) can be sent here —
+  // anything else would fail Cloudinary's signature check.
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("api_key", api_key);
+  formData.append("timestamp", timestamp);
+  formData.append("signature", signature);
+  formData.append("folder", folder);
+  formData.append("upload_preset", upload_preset);
+
+  const res = await fetch(
+    `https://api.cloudinary.com/v1_1/${cloud_name}/raw/upload`,
+    { method: "POST", body: formData }
+  );
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    throw new Error(`Cloudinary upload failed: ${res.status} ${errBody}`);
+  }
+
+  const data = await res.json();
+  return {
+    url: data.secure_url,
+    publicId: data.public_id,
+    format: data.format,
+    bytes: data.bytes,
+    originalFilename: data.original_filename,
+  };
 }
 
 const app = document.getElementById("app");
@@ -664,6 +749,11 @@ async function renderProfile(user) {
 
     <div class="card">
       <h2>Upload Resume</h2>
+      ${v.resume_file_url ? `
+        <p class="msg success">Current file: <a href="${v.resume_file_url}" target="_blank">${v.resume_file_name || "resume"}</a></p>
+      ` : `
+        <p class="msg">No resume file saved yet.</p>
+      `}
       <input type="file" id="resumeFile" accept=".pdf,.doc,.docx" />
       <button class="secondary" id="uploadBtn">Upload</button>
       <div class="msg hidden" id="uploadMsg"></div>
@@ -732,27 +822,25 @@ async function renderProfile(user) {
     msg.className = "msg";
     msg.textContent = "Uploading...";
 
-    // Stored at documents/{user_id}/resume-{filename}
-    // RLS storage policy checks that the first folder matches auth.uid()
-    const path = `${user.id}/resume-${file.name}`;
-    const { error } = await sb.storage.from("documents").upload(path, file, { upsert: true });
-
-    if (error) {
-      msg.className = "msg error";
-      msg.textContent = error.message;
-      return;
-    }
-
-    // Also extract the text content and save it, so the AI screens
-    // (Match & Tailor, Interview Prep) have it ready automatically.
     try {
+      const uploaded = await uploadResumeToCloudinary(file, user.id);
+
+      msg.textContent = "Extracting text...";
       const text = await extractTextFromFile(file);
-      await sb.from("profiles").update({ resume_text: text }).eq("id", userId);
+
+      await sb.from("profiles").update({
+        resume_text: text,
+        resume_file_url: uploaded?.url || null,
+        resume_file_name: file.name,
+      }).eq("id", user.id);
+
       msg.className = "msg success";
-      msg.textContent = "Resume uploaded and text extracted — ready for AI matching.";
-    } catch (extractErr) {
-      msg.className = "msg success";
-      msg.textContent = "Resume uploaded. (Text extraction failed — you can paste it manually on the AI Match page.)";
+      msg.textContent = uploaded
+        ? "Resume uploaded and text extracted — ready for AI matching."
+        : "Resume text extracted and saved. (File storage isn't configured yet — only the text was kept.)";
+    } catch (err) {
+      msg.className = "msg error";
+      msg.textContent = "Upload failed: " + err.message;
     }
   });
 }
@@ -808,8 +896,21 @@ async function renderMatch(user) {
     try {
       const text = await extractTextFromFile(file);
       document.getElementById("resumeText").value = text;
+
+      // Also save the original file to Cloudinary and record the extracted
+      // text, so it's available (as a real downloadable file, not just
+      // text) next time without re-uploading.
+      msg.textContent = "Saving file...";
+      const uploaded = await uploadResumeToCloudinary(file, user.id);
+      await sb.from("profiles").update({
+        resume_text: text,
+        ...(uploaded ? { resume_file_url: uploaded.url, resume_file_name: file.name } : {}),
+      }).eq("id", user.id);
+
       msg.className = "msg success";
-      msg.textContent = "Resume text loaded. Review below, then continue.";
+      msg.textContent = uploaded
+        ? "Resume text loaded and file saved. Review below, then continue."
+        : "Resume text loaded. Review below, then continue.";
     } catch (err) {
       msg.className = "msg error";
       msg.textContent = err.message;
@@ -1253,9 +1354,19 @@ async function renderQueue(user) {
     return;
   }
 
-  body.innerHTML = matches.map(m => {
+  body.innerHTML = matches.map((m, idx) => {
     let answers = {};
     try { answers = JSON.parse(m.application_answers); } catch {}
+
+    const answerFields = [
+      ["why_interested", "Why interested"],
+      ["why_good_fit", "Why a good fit"],
+      ["greatest_strength", "Greatest strength"],
+      ["biggest_achievement", "Biggest achievement"],
+      ["salary_expectations", "Salary expectations"],
+      ["availability_start_date", "Availability"],
+      ["additional_notes", "Additional notes"],
+    ];
 
     return `
       <div class="card">
@@ -1266,32 +1377,132 @@ async function renderQueue(user) {
         <details style="margin-top:10px;">
           <summary style="cursor:pointer;font-size:14px;font-weight:600;">Tailored Resume</summary>
           <p style="white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:8px;">${m.tailored_resume || ''}</p>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button class="secondary copy-field-btn" data-copy-idx="${idx}" data-field="resume" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Copy text</button>
+            <button class="secondary pdf-field-btn" data-copy-idx="${idx}" data-field="resume" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Download PDF</button>
+          </div>
         </details>
 
         <details style="margin-top:10px;">
           <summary style="cursor:pointer;font-size:14px;font-weight:600;">Cover Letter</summary>
           <p style="white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:8px;">${m.cover_letter || ''}</p>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button class="secondary copy-field-btn" data-copy-idx="${idx}" data-field="cover_letter" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Copy text</button>
+            <button class="secondary pdf-field-btn" data-copy-idx="${idx}" data-field="cover_letter" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Download PDF</button>
+          </div>
         </details>
 
         <details style="margin-top:10px;">
           <summary style="cursor:pointer;font-size:14px;font-weight:600;">Application Answers</summary>
           <div style="font-size:13px;line-height:1.5;margin-top:8px;">
-            ${answers.why_interested ? `<p><strong>Why interested:</strong> ${answers.why_interested}</p>` : ''}
-            ${answers.why_good_fit ? `<p><strong>Why a good fit:</strong> ${answers.why_good_fit}</p>` : ''}
-            ${answers.greatest_strength ? `<p><strong>Greatest strength:</strong> ${answers.greatest_strength}</p>` : ''}
-            ${answers.biggest_achievement ? `<p><strong>Biggest achievement:</strong> ${answers.biggest_achievement}</p>` : ''}
-            ${answers.salary_expectations ? `<p><strong>Salary expectations:</strong> ${answers.salary_expectations}</p>` : ''}
-            ${answers.availability_start_date ? `<p><strong>Availability:</strong> ${answers.availability_start_date}</p>` : ''}
-            ${answers.additional_notes ? `<p><strong>Additional notes:</strong> ${answers.additional_notes}</p>` : ''}
+            ${answerFields.map(([key, label]) => answers[key] ? `
+              <div style="margin-bottom:10px;">
+                <p style="margin:0 0 4px;"><strong>${label}:</strong> ${answers[key]}</p>
+                <button class="secondary copy-field-btn" data-copy-idx="${idx}" data-field="answer_${key}" style="margin-top:0;width:auto;padding:5px 10px;font-size:11.5px;">Copy</button>
+              </div>
+            ` : '').join('')}
           </div>
         </details>
 
-        <a href="${m.jobs?.url}" target="_blank" style="font-size:13px;display:block;margin-top:12px;">
-          <button style="margin-top:0;">Open Original Listing & Apply →</button>
-        </a>
+        <button class="open-apply-btn" data-copy-idx="${idx}" style="margin-top:12px;">
+          Open Original Listing & Apply →
+        </button>
+        <p class="msg" id="applyMsg-${idx}" style="text-align:center;"></p>
       </div>
     `;
   }).join("");
+
+  // Store the raw values so click handlers can look them up by index without
+  // re-parsing JSON or re-escaping HTML out of the DOM.
+  const queueData = matches.map(m => {
+    let answers = {};
+    try { answers = JSON.parse(m.application_answers); } catch {}
+    return {
+      resume: m.tailored_resume || "",
+      cover_letter: m.cover_letter || "",
+      answers,
+      title: m.jobs?.title || "Application",
+      company: m.jobs?.company || "",
+      url: m.jobs?.url || "",
+    };
+  });
+
+  async function copyToClipboard(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function downloadPdf(text, filename) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: "pt", format: "letter" });
+    const margin = 54;
+    const maxWidth = doc.internal.pageSize.getWidth() - margin * 2;
+    const lineHeight = 14;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    const lines = doc.splitTextToSize(text, maxWidth);
+    let y = margin;
+    lines.forEach(line => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += lineHeight;
+    });
+    doc.save(filename);
+  }
+
+  document.querySelectorAll(".copy-field-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const idx = Number(btn.dataset.copyIdx);
+      const field = btn.dataset.field;
+      const item = queueData[idx];
+      let text = "";
+      if (field === "resume") text = item.resume;
+      else if (field === "cover_letter") text = item.cover_letter;
+      else if (field.startsWith("answer_")) text = item.answers[field.replace("answer_", "")] || "";
+
+      const ok = await copyToClipboard(text);
+      const original = btn.textContent;
+      btn.textContent = ok ? "Copied ✓" : "Copy failed";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    });
+  });
+
+  document.querySelectorAll(".pdf-field-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.copyIdx);
+      const field = btn.dataset.field;
+      const item = queueData[idx];
+      const text = field === "resume" ? item.resume : item.cover_letter;
+      const label = field === "resume" ? "Resume" : "Cover Letter";
+      const safeCompany = (item.company || "Application").replace(/[^a-z0-9]+/gi, "_");
+      downloadPdf(text, `${safeCompany}_${label.replace(" ", "_")}.pdf`);
+    });
+  });
+
+  document.querySelectorAll(".open-apply-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const idx = Number(btn.dataset.copyIdx);
+      const item = queueData[idx];
+      const msgEl = document.getElementById(`applyMsg-${idx}`);
+
+      // Most application forms ask for the resume text first, so copy that
+      // to the clipboard automatically the moment the listing opens —
+      // one less manual step before pasting it in.
+      const ok = await copyToClipboard(item.resume);
+      msgEl.textContent = ok
+        ? "Resume copied to clipboard — paste it into the form. Cover letter and answers are still in the sections above."
+        : "Opening listing — copy the resume/cover letter above before pasting into the form.";
+
+      window.open(item.url, "_blank");
+    });
+  });
 }
 
 // ------------------------------------------------------------
@@ -1435,8 +1646,21 @@ async function renderInterview(user) {
     try {
       const text = await extractTextFromFile(file);
       document.getElementById("resumeText").value = text;
+
+      // Also save the original file to Cloudinary and record the extracted
+      // text, so it's available (as a real downloadable file, not just
+      // text) next time without re-uploading.
+      msg.textContent = "Saving file...";
+      const uploaded = await uploadResumeToCloudinary(file, user.id);
+      await sb.from("profiles").update({
+        resume_text: text,
+        ...(uploaded ? { resume_file_url: uploaded.url, resume_file_name: file.name } : {}),
+      }).eq("id", user.id);
+
       msg.className = "msg success";
-      msg.textContent = "Resume text loaded. Review below, then continue.";
+      msg.textContent = uploaded
+        ? "Resume text loaded and file saved. Review below, then continue."
+        : "Resume text loaded. Review below, then continue.";
     } catch (err) {
       msg.className = "msg error";
       msg.textContent = err.message;
