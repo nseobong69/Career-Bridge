@@ -652,8 +652,9 @@ async function renderMatch(user) {
 // JOB DISCOVERY (Phase 3)
 // ------------------------------------------------------------
 async function renderJobs(user) {
-  const { data: profile } = await sb.from("profiles").select("resume_text").eq("id", user.id).single();
+  const { data: profile } = await sb.from("profiles").select("resume_text, is_admin").eq("id", user.id).single();
   const resumeText = profile?.resume_text || "";
+  const isAdmin = profile?.is_admin || false;
 
   app.innerHTML = `
     <div class="topbar">
@@ -667,31 +668,56 @@ async function renderJobs(user) {
       </div>
     ` : ''}
 
-    <div class="card">
-      <button id="fetchBtn">Fetch Latest Jobs</button>
-      <div class="msg hidden" id="fetchMsg"></div>
-    </div>
+    ${isAdmin ? `
+      <div class="card">
+        <button id="fetchBtn">Fetch Latest Jobs (Admin)</button>
+        <div class="msg hidden" id="fetchMsg"></div>
+      </div>
+    ` : ''}
 
     <div class="card">
+      <label>Search keywords (title, company, location)</label>
+      <input type="text" id="keywordSearch" placeholder="e.g. school, principal, education, teacher" />
+
       <label>Filter by source</label>
       <select id="sourceFilter">
         <option value="">All sources</option>
         <option value="remoteok">RemoteOK</option>
         <option value="arbeitnow">Arbeitnow</option>
         <option value="jobicy">Jobicy</option>
+        <option value="adzuna">Adzuna</option>
       </select>
     </div>
 
     <div id="jobsList"></div>
+    <div id="loadMoreWrap"></div>
   `;
 
-  document.getElementById("sourceFilter").addEventListener("change", () => loadJobsList());
+  let currentPage = 0;
+  const PAGE_SIZE = 30;
+  let allLoadedJobs = [];
+
+  document.getElementById("sourceFilter").addEventListener("change", () => {
+    currentPage = 0;
+    loadJobsList(false);
+  });
+
+  let searchTimeout;
+  document.getElementById("keywordSearch").addEventListener("input", () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      currentPage = 0;
+      loadJobsList(false);
+    }, 400); // wait briefly after typing stops before searching
+  });
 
   document.getElementById("backBtn").addEventListener("click", () => {
     window.location.hash = "dashboard";
   });
 
-  document.getElementById("fetchBtn").addEventListener("click", async () => {
+  const fetchBtnEl = document.getElementById("fetchBtn");
+  if (fetchBtnEl) {
+    fetchBtnEl.addEventListener("click", async () => {
     const btn = document.getElementById("fetchBtn");
     const msg = document.getElementById("fetchMsg");
     btn.disabled = true;
@@ -718,23 +744,41 @@ async function renderJobs(user) {
     }
 
     btn.disabled = false;
-    btn.textContent = "Fetch Latest Jobs";
-    loadJobsList();
-  });
+    btn.textContent = "Fetch Latest Jobs (Admin)";
+    currentPage = 0;
+    loadJobsList(false);
+    });
+  }
 
-  async function loadJobsList() {
+  async function loadJobsList(append = false) {
     const listEl = document.getElementById("jobsList");
-    listEl.innerHTML = `<p class="msg">Loading jobs...</p>`;
+    const loadMoreWrap = document.getElementById("loadMoreWrap");
+    if (!append) listEl.innerHTML = `<p class="msg">Loading jobs...</p>`;
 
     const selectedSource = document.getElementById("sourceFilter")?.value || "";
+    const keyword = document.getElementById("keywordSearch")?.value.trim() || "";
 
-    let query = sb.from("jobs").select("*").order("posted_at", { ascending: false }).limit(30);
+    let query = sb.from("jobs").select("*").order("posted_at", { ascending: false });
     if (selectedSource) query = query.eq("source", selectedSource);
+
+    if (keyword) {
+      // Matches the keyword against title, company, or location (case-insensitive)
+      query = query.or(
+        `title.ilike.%${keyword}%,company.ilike.%${keyword}%,location.ilike.%${keyword}%,category.ilike.%${keyword}%`
+      );
+    }
+
+    query = query.range(currentPage * PAGE_SIZE, currentPage * PAGE_SIZE + PAGE_SIZE - 1);
 
     const { data: jobs } = await query;
 
-    if (!jobs || jobs.length === 0) {
-      listEl.innerHTML = `<p class="msg">No jobs yet — tap "Fetch Latest Jobs" above.</p>`;
+    if (!append) allLoadedJobs = [];
+    const newJobs = jobs || [];
+    allLoadedJobs = append ? [...allLoadedJobs, ...newJobs] : newJobs;
+
+    if (allLoadedJobs.length === 0) {
+      listEl.innerHTML = `<p class="msg">No jobs match${keyword ? ` "${keyword}"` : ''} yet. Try a different keyword, or tap "Fetch Latest Jobs" above.</p>`;
+      loadMoreWrap.innerHTML = "";
       return;
     }
 
@@ -746,7 +790,7 @@ async function renderJobs(user) {
     const matchByJobId = {};
     (matches || []).forEach(m => matchByJobId[m.job_id] = m);
 
-    listEl.innerHTML = jobs.map(job => {
+    listEl.innerHTML = allLoadedJobs.map(job => {
       const match = matchByJobId[job.id];
       return `
         <div class="card">
@@ -764,8 +808,19 @@ async function renderJobs(user) {
     }).join("");
 
     document.querySelectorAll(".score-btn").forEach(btn => {
-      btn.addEventListener("click", () => scoreJob(btn.dataset.jobId, jobs));
+      btn.addEventListener("click", () => scoreJob(btn.dataset.jobId, allLoadedJobs));
     });
+
+    // Show "Load More" only if this page came back full (more may exist)
+    if (newJobs.length === PAGE_SIZE) {
+      loadMoreWrap.innerHTML = `<button class="secondary" id="loadMoreBtn" style="margin:12px 0;">Load More</button>`;
+      document.getElementById("loadMoreBtn").addEventListener("click", () => {
+        currentPage++;
+        loadJobsList(true);
+      });
+    } else {
+      loadMoreWrap.innerHTML = "";
+    }
   }
 
   async function scoreJob(jobId, jobs) {
@@ -812,13 +867,13 @@ async function renderJobs(user) {
 
       await logUsage(user, "score");
 
-      loadJobsList();
+      loadJobsList(false);
     } catch (err) {
       resultEl.textContent = "Scoring failed: " + err.message;
     }
   }
 
-  loadJobsList();
+  loadJobsList(false);
 }
 
 // ------------------------------------------------------------
@@ -1089,14 +1144,20 @@ const PLANS = [
   { key: "premium", label: "Premium", price: 30000, amountKobo: 3000000, credits: "Unlimited" },
 ];
 
-// Call this before any AI action (score, tailor, cover letter, interview prep)
-// to enforce the free/basic plan's monthly credit limit.
+// Call this before any credit-consuming action (AI score, tailor, cover
+// letter, interview prep, or job fetching) to enforce the plan's monthly
+// limit. Admins bypass this entirely — unlimited, no logging required.
 async function checkUsageAllowed(user) {
+  const { data: profile } = await sb.from("profiles").select("is_admin").eq("id", user.id).single();
+  if (profile?.is_admin) {
+    return { allowed: true, unlimited: true, isAdmin: true };
+  }
+
   const { data: subscription } = await sb.from("subscriptions").select("plan").eq("user_id", user.id).single();
   const plan = subscription?.plan || "free";
   const limit = PLAN_LIMITS[plan] ?? PLAN_LIMITS.free;
 
-  if (limit === Infinity) return { allowed: true };
+  if (limit === Infinity) return { allowed: true, plan };
 
   const startOfMonth = new Date();
   startOfMonth.setDate(1);
@@ -1115,6 +1176,11 @@ async function checkUsageAllowed(user) {
 }
 
 async function logUsage(user, action) {
+  // Admin actions aren't metered, so skip logging them — keeps usage
+  // stats meaningful for real paying/free users only.
+  const { data: profile } = await sb.from("profiles").select("is_admin").eq("id", user.id).single();
+  if (profile?.is_admin) return;
+
   await sb.from("ai_usage_log").insert({ user_id: user.id, action });
 }
 
