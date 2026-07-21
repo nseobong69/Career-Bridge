@@ -1232,7 +1232,12 @@ async function renderJobs(user) {
       if (data.error) {
         throw new Error(data.error);
       }
-      const parsed = JSON.parse(data.result);
+      let parsed;
+      try {
+        parsed = JSON.parse(data.result);
+      } catch {
+        throw new Error("AI returned an incomplete response — please try again.");
+      }
 
       await sb.from("job_matches").upsert({
         user_id: user.id,
