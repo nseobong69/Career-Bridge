@@ -1229,6 +1229,9 @@ async function renderJobs(user) {
         }),
       });
       const data = await res.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
       const parsed = JSON.parse(data.result);
 
       await sb.from("job_matches").upsert({
@@ -1350,7 +1353,7 @@ async function renderQueue(user) {
 
     <div class="card">
       <h2 style="font-size:16px;">Answer From Screenshots</h2>
-      <p class="msg">Upload up to 10 screenshots of an application form's questions. The AI reads them and drafts an answer for each, based on your resume. Nothing is saved — just generated fresh each time.</p>
+      <p class="msg">Upload up to 5 screenshots of an application form's questions. The AI reads them and drafts an answer for each, based on your resume. Nothing is saved — just generated fresh each time.</p>
       <input type="file" id="screenshotInput" accept="image/*" multiple />
       <p class="msg" id="screenshotCount"></p>
       <button id="analyzeScreenshotsBtn" style="margin-top:10px;">Analyze Screenshots</button>
@@ -1369,9 +1372,9 @@ async function renderQueue(user) {
   screenshotInput.addEventListener("change", () => {
     const count = screenshotInput.files.length;
     const countEl = document.getElementById("screenshotCount");
-    if (count > 10) {
+    if (count > 5) {
       countEl.className = "msg error";
-      countEl.textContent = `${count} selected — please choose 10 or fewer.`;
+      countEl.textContent = `${count} selected — please choose 5 or fewer.`;
     } else {
       countEl.className = "msg";
       countEl.textContent = count ? `${count} image${count > 1 ? 's' : ''} selected.` : '';
@@ -1396,10 +1399,10 @@ async function renderQueue(user) {
       msg.textContent = "Choose at least one screenshot.";
       return;
     }
-    if (files.length > 10) {
+    if (files.length > 5) {
       msg.classList.remove("hidden");
       msg.className = "msg error";
-      msg.textContent = "Please choose 10 or fewer images.";
+      msg.textContent = "Please choose 5 or fewer images.";
       return;
     }
 
