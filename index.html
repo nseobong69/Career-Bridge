@@ -6,6 +6,7 @@
 <title>Career Bridge</title>
 <script src="https://js.paystack.co/v1/inline.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html-docx-js/dist/html-docx.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -1324,17 +1325,173 @@ async function renderJobs(user) {
 // APPLICATION QUEUE
 // ------------------------------------------------------------
 async function renderQueue(user) {
+  const { data: profile } = await sb.from("profiles").select("resume_text").eq("id", user.id).single();
+  const resumeText = profile?.resume_text || "";
+
   app.innerHTML = `
     <div class="topbar">
       <h1 style="font-size:20px;margin:0;">Application Queue</h1>
       <button class="secondary" id="backBtn">Back</button>
     </div>
+
+    <div class="card">
+      <h2 style="font-size:16px;">Answer From Screenshots</h2>
+      <p class="msg">Upload up to 10 screenshots of an application form's questions. The AI reads them and drafts an answer for each, based on your resume. Nothing is saved — just generated fresh each time.</p>
+      <input type="file" id="screenshotInput" accept="image/*" multiple />
+      <p class="msg" id="screenshotCount"></p>
+      <button id="analyzeScreenshotsBtn" style="margin-top:10px;">Analyze Screenshots</button>
+      <div class="msg hidden" id="screenshotMsg"></div>
+      <div id="screenshotResults"></div>
+    </div>
+
     <div id="queueBody"><p class="msg">Loading...</p></div>
   `;
 
   document.getElementById("backBtn").addEventListener("click", () => {
     window.location.hash = "dashboard";
   });
+
+  const screenshotInput = document.getElementById("screenshotInput");
+  screenshotInput.addEventListener("change", () => {
+    const count = screenshotInput.files.length;
+    const countEl = document.getElementById("screenshotCount");
+    if (count > 10) {
+      countEl.className = "msg error";
+      countEl.textContent = `${count} selected — please choose 10 or fewer.`;
+    } else {
+      countEl.className = "msg";
+      countEl.textContent = count ? `${count} image${count > 1 ? 's' : ''} selected.` : '';
+    }
+  });
+
+  document.getElementById("analyzeScreenshotsBtn").addEventListener("click", async () => {
+    const files = Array.from(screenshotInput.files);
+    const msg = document.getElementById("screenshotMsg");
+    const resultsEl = document.getElementById("screenshotResults");
+    const btn = document.getElementById("analyzeScreenshotsBtn");
+
+    if (!resumeText) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = 'No resume text saved yet. Go to "AI Resume Match & Tailor" and upload/paste your resume first.';
+      return;
+    }
+    if (files.length === 0) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = "Choose at least one screenshot.";
+      return;
+    }
+    if (files.length > 10) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = "Please choose 10 or fewer images.";
+      return;
+    }
+
+    const usage = await checkUsageAllowed(user);
+    if (!usage.allowed) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = `You've used all ${usage.limit} AI actions on the ${usage.plan} plan this month. Upgrade on the Billing page.`;
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "Reading screenshots...";
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "This can take a bit longer than text requests — analyzing images...";
+    resultsEl.innerHTML = "";
+
+    try {
+      // Convert each image file to a base64 data URL the vision model can read.
+      const imageDataUrls = await Promise.all(files.map(file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      })));
+
+      const { data: sessionData } = await sb.auth.getSession();
+      const token = sessionData.session.access_token;
+
+      const res = await fetch(TAILOR_FUNCTION_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+          "apikey": SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({
+          action: "answer_from_screenshots",
+          resumeText,
+          images: imageDataUrls,
+        }),
+      });
+
+      const data = await res.json();
+      msg.classList.add("hidden");
+
+      if (data.error) {
+        msg.classList.remove("hidden");
+        msg.className = "msg error";
+        msg.textContent = data.error;
+        btn.disabled = false;
+        btn.textContent = "Analyze Screenshots";
+        return;
+      }
+
+      await logUsage(user, "answer_from_screenshots");
+
+      let parsed;
+      try {
+        parsed = JSON.parse(data.result);
+      } catch {
+        resultsEl.innerHTML = `<div class="card"><p style="white-space:pre-wrap;font-size:13px;">${data.result}</p></div>`;
+        btn.disabled = false;
+        btn.textContent = "Analyze Screenshots";
+        return;
+      }
+
+      const answers = parsed.answers || [];
+      resultsEl.innerHTML = answers.map((a, i) => `
+        <div class="card">
+          <p style="font-size:13px;color:#666;margin:0 0 4px;"><strong>${a.question}</strong></p>
+          <p style="font-size:14px;margin:0 0 8px;">${a.answer}</p>
+          <button class="secondary screenshot-copy-btn" data-idx="${i}" style="width:auto;padding:6px 12px;font-size:12px;">Copy</button>
+        </div>
+      `).join("");
+
+      window._screenshotAnswers = answers;
+      document.querySelectorAll(".screenshot-copy-btn").forEach(cbtn => {
+        cbtn.addEventListener("click", async () => {
+          const idx = Number(cbtn.dataset.idx);
+          const ok = await copyToClipboard(window._screenshotAnswers[idx].answer);
+          const original = cbtn.textContent;
+          cbtn.textContent = ok ? "Copied ✓" : "Copy failed";
+          setTimeout(() => { cbtn.textContent = original; }, 1500);
+        });
+      });
+    } catch (err) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = "Something went wrong: " + err.message;
+    }
+
+    btn.disabled = false;
+    btn.textContent = "Analyze Screenshots";
+  });
+
+  async function copyToClipboard(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
 
   const { data: matches } = await sb
     .from("job_matches")
@@ -1377,18 +1534,20 @@ async function renderQueue(user) {
         <details style="margin-top:10px;">
           <summary style="cursor:pointer;font-size:14px;font-weight:600;">Tailored Resume</summary>
           <p style="white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:8px;">${m.tailored_resume || ''}</p>
-          <div style="display:flex;gap:8px;margin-top:8px;">
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
             <button class="secondary copy-field-btn" data-copy-idx="${idx}" data-field="resume" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Copy text</button>
-            <button class="secondary pdf-field-btn" data-copy-idx="${idx}" data-field="resume" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Download PDF</button>
+            <button class="secondary pdf-field-btn" data-copy-idx="${idx}" data-field="resume" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">PDF</button>
+            <button class="secondary word-field-btn" data-copy-idx="${idx}" data-field="resume" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Word</button>
           </div>
         </details>
 
         <details style="margin-top:10px;">
           <summary style="cursor:pointer;font-size:14px;font-weight:600;">Cover Letter</summary>
           <p style="white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:8px;">${m.cover_letter || ''}</p>
-          <div style="display:flex;gap:8px;margin-top:8px;">
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
             <button class="secondary copy-field-btn" data-copy-idx="${idx}" data-field="cover_letter" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Copy text</button>
-            <button class="secondary pdf-field-btn" data-copy-idx="${idx}" data-field="cover_letter" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Download PDF</button>
+            <button class="secondary pdf-field-btn" data-copy-idx="${idx}" data-field="cover_letter" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">PDF</button>
+            <button class="secondary word-field-btn" data-copy-idx="${idx}" data-field="cover_letter" style="margin-top:0;flex:1;font-size:12.5px;padding:9px;">Word</button>
           </div>
         </details>
 
@@ -1427,15 +1586,6 @@ async function renderQueue(user) {
     };
   });
 
-  async function copyToClipboard(text) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-
   function downloadPdf(text, filename) {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: "pt", format: "letter" });
@@ -1455,6 +1605,34 @@ async function renderQueue(user) {
       y += lineHeight;
     });
     doc.save(filename);
+  }
+
+  // Produces a genuine .docx file (real OOXML, the actual Word file format —
+  // not an HTML file renamed) using html-docx-js, which converts an HTML
+  // string into a properly zipped Word document in the browser.
+  function downloadWord(text, filename) {
+    const escapeHtml = (s) => s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+
+    const bodyHtml = text
+      .split("\n")
+      .map(line => `<p style="margin:0 0 10px;font-family:Calibri,Arial,sans-serif;font-size:11pt;">${escapeHtml(line) || "&nbsp;"}</p>`)
+      .join("");
+
+    const htmlDoc = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Document</title></head>
+<body>${bodyHtml}</body></html>`;
+
+    const docxBlob = htmlDocx.asBlob(htmlDoc);
+    const url = URL.createObjectURL(docxBlob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   document.querySelectorAll(".copy-field-btn").forEach(btn => {
@@ -1483,6 +1661,18 @@ async function renderQueue(user) {
       const label = field === "resume" ? "Resume" : "Cover Letter";
       const safeCompany = (item.company || "Application").replace(/[^a-z0-9]+/gi, "_");
       downloadPdf(text, `${safeCompany}_${label.replace(" ", "_")}.pdf`);
+    });
+  });
+
+  document.querySelectorAll(".word-field-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.copyIdx);
+      const field = btn.dataset.field;
+      const item = queueData[idx];
+      const text = field === "resume" ? item.resume : item.cover_letter;
+      const label = field === "resume" ? "Resume" : "Cover Letter";
+      const safeCompany = (item.company || "Application").replace(/[^a-z0-9]+/gi, "_");
+      downloadWord(text, `${safeCompany}_${label.replace(" ", "_")}.docx`);
     });
   });
 
