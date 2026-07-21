@@ -372,6 +372,7 @@ async function render() {
   if (route === "interview") return renderInterview(user);
   if (route === "billing") return renderBilling(user);
   if (route === "admin") return renderAdmin(user);
+  if (route === "content-tools") return renderContentTools(user);
   return renderLogin();
 }
 
@@ -2192,6 +2193,12 @@ async function renderAdmin(user) {
       <h1 style="font-size:20px;margin:0;">Admin Dashboard</h1>
       <button class="secondary" id="backBtn">Back</button>
     </div>
+    <a href="#content-tools" class="nav-tile">
+      <div class="card" style="border-color:#111;">
+        <h2 style="font-size:16px;">Content Tools</h2>
+        <p class="msg">Scan text for AI patterns, humanize, or paraphrase — up to 50,000 words</p>
+      </div>
+    </a>
     <div id="adminBody"><p class="msg">Loading stats...</p></div>
   `;
 
@@ -2291,6 +2298,279 @@ function field(name, label, value, type = "text") {
     <label>${label}</label>
     <input type="${type}" id="${name}" value="${value != null ? value : ''}" />
   `;
+}
+
+// ------------------------------------------------------------
+// ADMIN CONTENT TOOLS: AI-pattern scan, humanize, paraphrase
+// ------------------------------------------------------------
+const CONTENT_TOOLS_MAX_WORDS = 50000;
+const CONTENT_TOOLS_CHUNK_WORDS = 2500; // per-request chunk size, keeps each Groq call fast and reliable
+
+function countWords(text) {
+  return (text.trim().match(/\S+/g) || []).length;
+}
+
+// Splits text into ~chunkSize-word pieces, preferring to break on paragraph
+// boundaries so context isn't cut mid-sentence where avoidable.
+function chunkText(text, chunkSize) {
+  const paragraphs = text.split(/\n\s*\n/);
+  const chunks = [];
+  let current = "";
+  let currentWords = 0;
+
+  for (const para of paragraphs) {
+    const paraWords = countWords(para);
+    if (currentWords + paraWords > chunkSize && current) {
+      chunks.push(current.trim());
+      current = "";
+      currentWords = 0;
+    }
+    current += para + "\n\n";
+    currentWords += paraWords;
+
+    // A single paragraph longer than the chunk size on its own: hard-split it.
+    if (paraWords > chunkSize) {
+      const words = current.trim().split(/\s+/);
+      current = "";
+      currentWords = 0;
+      for (let i = 0; i < words.length; i += chunkSize) {
+        chunks.push(words.slice(i, i + chunkSize).join(" "));
+      }
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+async function renderContentTools(user) {
+  const { data: profile } = await sb.from("profiles").select("is_admin").eq("id", user.id).single();
+  if (!profile?.is_admin) {
+    app.innerHTML = `
+      <div class="card">
+        <h2>Not authorized</h2>
+        <p class="msg">This page is restricted to admin accounts.</p>
+        <p class="link"><a href="#dashboard">Back to dashboard</a></p>
+      </div>
+    `;
+    return;
+  }
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">Content Tools</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+
+    <div class="card">
+      <p class="msg">Upload a file or paste text below (up to ${CONTENT_TOOLS_MAX_WORDS.toLocaleString()} words). Long text is processed in chunks, so larger inputs take longer — you'll see progress as it runs.</p>
+      <p class="msg" style="color:#999;font-size:12px;">Nothing here is saved to the database. Text and results only exist in this browser tab and are gone if you reload or navigate away — copy or download anything you want to keep.</p>
+
+      <label>Upload file (PDF, DOCX, or TXT)</label>
+      <input type="file" id="ctFileInput" accept=".pdf,.docx,.txt" />
+      <div class="msg hidden" id="ctExtractMsg"></div>
+
+      <label>Or paste text</label>
+      <textarea id="ctText" rows="14" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;"></textarea>
+      <p class="msg" id="ctWordCount">0 words</p>
+
+      <button id="ctDetectBtn">Scan for AI Patterns</button>
+      <button class="secondary" id="ctHumanizeBtn">Humanize</button>
+      <button class="secondary" id="ctParaphraseBtn">Paraphrase</button>
+
+      <div class="msg hidden" id="ctProgressMsg"></div>
+    </div>
+
+    <div id="ctResults"></div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "admin";
+  });
+
+  const textArea = document.getElementById("ctText");
+  const wordCountEl = document.getElementById("ctWordCount");
+
+  function updateWordCount() {
+    const count = countWords(textArea.value);
+    wordCountEl.className = count > CONTENT_TOOLS_MAX_WORDS ? "msg error" : "msg";
+    wordCountEl.textContent = count > CONTENT_TOOLS_MAX_WORDS
+      ? `${count.toLocaleString()} words — over the ${CONTENT_TOOLS_MAX_WORDS.toLocaleString()} word limit, please trim.`
+      : `${count.toLocaleString()} words`;
+  }
+  textArea.addEventListener("input", updateWordCount);
+
+  document.getElementById("ctFileInput").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const msg = document.getElementById("ctExtractMsg");
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Reading file...";
+    try {
+      const text = await extractTextFromFile(file);
+      textArea.value = text;
+      updateWordCount();
+      msg.className = "msg success";
+      msg.textContent = "File loaded below. Review before running a tool.";
+    } catch (err) {
+      msg.className = "msg error";
+      msg.textContent = err.message;
+    }
+  });
+
+  async function runTool(action, label) {
+    const text = textArea.value.trim();
+    const progressMsg = document.getElementById("ctProgressMsg");
+    const resultsEl = document.getElementById("ctResults");
+    const buttons = [ctDetectBtn, ctHumanizeBtn, ctParaphraseBtn];
+
+    if (!text) {
+      progressMsg.classList.remove("hidden");
+      progressMsg.className = "msg error";
+      progressMsg.textContent = "Add some text first — upload a file or paste it above.";
+      return;
+    }
+    const wordCount = countWords(text);
+    if (wordCount > CONTENT_TOOLS_MAX_WORDS) {
+      progressMsg.classList.remove("hidden");
+      progressMsg.className = "msg error";
+      progressMsg.textContent = `Text is ${wordCount.toLocaleString()} words — please trim to ${CONTENT_TOOLS_MAX_WORDS.toLocaleString()} or fewer.`;
+      return;
+    }
+
+    buttons.forEach(b => b.disabled = true);
+    resultsEl.innerHTML = "";
+    progressMsg.classList.remove("hidden");
+    progressMsg.className = "msg";
+
+    const chunks = chunkText(text, CONTENT_TOOLS_CHUNK_WORDS);
+    const { data: sessionData } = await sb.auth.getSession();
+    const token = sessionData.session.access_token;
+
+    try {
+      if (action === "detect_ai") {
+        let totalBlended = 0, totalModel = 0;
+        let allFlagged = [];
+        let agreementNotes = [];
+        let styloSamples = [];
+        for (let i = 0; i < chunks.length; i++) {
+          progressMsg.textContent = `Scanning part ${i + 1} of ${chunks.length} (running two-pass consensus + stylometric analysis)...`;
+          const res = await fetch(TAILOR_FUNCTION_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}`, "apikey": SUPABASE_ANON_KEY },
+            body: JSON.stringify({ action: "detect_ai", text: chunks[i] }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          const parsed = JSON.parse(data.result);
+          totalBlended += parsed.ai_likelihood_percent || 0;
+          totalModel += parsed.model_judgment_percent || 0;
+          agreementNotes.push(parsed.model_pass_agreement);
+          if (parsed.stylometric_signal) styloSamples.push(parsed.stylometric_signal);
+          allFlagged = allFlagged.concat((parsed.flagged_passages || []).map(f => ({ ...f, part: i + 1 })));
+        }
+        const avgBlended = Math.round(totalBlended / chunks.length);
+        const avgModel = Math.round(totalModel / chunks.length);
+        const anyVariable = agreementNotes.some(n => n && n.includes("variable"));
+        const avgBurstiness = styloSamples.length
+          ? (styloSamples.reduce((sum, s) => sum + (s.burstiness || 0), 0) / styloSamples.length).toFixed(2)
+          : null;
+
+        const scanSummaryText = `AI Pattern Scan Result\n` +
+          `Blended estimate: ${avgBlended}%\n` +
+          `  - Model judgment (2-pass average): ${avgModel}%\n` +
+          `  - Sentence-length burstiness: ${avgBurstiness ?? "n/a"} (human writing is typically >0.5; lower values are more AI-typical)\n` +
+          `  - Pass consistency: ${anyVariable ? "Variable between passes — treat with extra caution" : "Consistent between passes"}\n` +
+          `(Heuristic estimate only — not a certainty. No AI detector is 100% accurate.)\n\n` +
+          (allFlagged.length
+            ? `Flagged passages:\n` + allFlagged.map(f => `- "${f.excerpt}"\n  Reason: ${f.reason}`).join("\n\n")
+            : `No specific passages flagged.`);
+
+        progressMsg.classList.add("hidden");
+        resultsEl.innerHTML = `
+          <div class="card">
+            <h2>AI Pattern Scan Result</h2>
+            <p class="msg" style="font-size:13px;color:#999;">Blended from two independent model passes plus objective sentence-rhythm (burstiness) analysis. Still a heuristic — no AI detector, including this one, is 100% accurate. Use as one signal among several, not a final verdict.</p>
+            <p style="font-size:28px;font-weight:700;margin:12px 0;">${avgBlended}% <span style="font-size:14px;font-weight:400;color:#666;">blended AI-pattern likelihood</span></p>
+
+            <div style="background:#f8f8f8;border-radius:8px;padding:10px;margin-bottom:12px;font-size:13px;">
+              <p style="margin:0 0 4px;">Model judgment (2-pass avg): <strong>${avgModel}%</strong></p>
+              <p style="margin:0 0 4px;">Sentence-length burstiness: <strong>${avgBurstiness ?? "n/a"}</strong> ${avgBurstiness ? '<span style="color:#666;">(human writing typically &gt;0.5)</span>' : ''}</p>
+              <p style="margin:0;">Consistency across passes: <strong>${anyVariable ? "Variable — lower confidence" : "Consistent"}</strong></p>
+            </div>
+
+            ${allFlagged.length ? `
+              <h3 style="font-size:14px;margin-top:16px;">Flagged passages</h3>
+              ${allFlagged.map(f => `
+                <div style="margin-top:8px;padding:10px;background:#f8f8f8;border-radius:8px;">
+                  <p style="font-size:13px;font-style:italic;margin:0 0 4px;">"${f.excerpt}"</p>
+                  <p style="font-size:12px;color:#666;margin:0;">${f.reason}</p>
+                </div>
+              `).join('')}
+            ` : `<p class="msg">No specific passages flagged.</p>`}
+            <button class="secondary" id="ctScanCopyBtn" style="margin-top:12px;">Copy result</button>
+          </div>
+        `;
+        document.getElementById("ctScanCopyBtn").addEventListener("click", async () => {
+          await navigator.clipboard.writeText(scanSummaryText);
+          const btn = document.getElementById("ctScanCopyBtn");
+          btn.textContent = "Copied ✓";
+          setTimeout(() => { btn.textContent = "Copy result"; }, 1500);
+        });
+      } else {
+        // humanize or paraphrase: process each chunk, stitch results together
+        let combined = "";
+        for (let i = 0; i < chunks.length; i++) {
+          progressMsg.textContent = action === "humanize"
+            ? `${label}ing part ${i + 1} of ${chunks.length} (two-pass refinement, takes a bit longer)...`
+            : `${label}ing part ${i + 1} of ${chunks.length}...`;
+          const res = await fetch(TAILOR_FUNCTION_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}`, "apikey": SUPABASE_ANON_KEY },
+            body: JSON.stringify({ action, text: chunks[i] }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          combined += (i > 0 ? "\n\n" : "") + data.result;
+        }
+
+        progressMsg.classList.add("hidden");
+        resultsEl.innerHTML = `
+          <div class="card">
+            <h2>${label}d Text</h2>
+            <p style="white-space:pre-wrap;font-size:13px;line-height:1.5;">${combined}</p>
+            <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+              <button class="secondary" id="ctCopyBtn" style="flex:1;margin-top:0;">Copy text</button>
+              <button class="secondary" id="ctWordDownloadBtn" style="flex:1;margin-top:0;">Download Word</button>
+            </div>
+          </div>
+        `;
+        document.getElementById("ctCopyBtn").addEventListener("click", async () => {
+          await navigator.clipboard.writeText(combined);
+          const btn = document.getElementById("ctCopyBtn");
+          btn.textContent = "Copied ✓";
+          setTimeout(() => { btn.textContent = "Copy text"; }, 1500);
+        });
+        document.getElementById("ctWordDownloadBtn").addEventListener("click", () => {
+          downloadWord(combined, `${label}_output.docx`);
+        });
+      }
+    } catch (err) {
+      progressMsg.classList.remove("hidden");
+      progressMsg.className = "msg error";
+      progressMsg.textContent = "Failed: " + err.message;
+    }
+
+    buttons.forEach(b => b.disabled = false);
+  }
+
+  const ctDetectBtn = document.getElementById("ctDetectBtn");
+  const ctHumanizeBtn = document.getElementById("ctHumanizeBtn");
+  const ctParaphraseBtn = document.getElementById("ctParaphraseBtn");
+
+  ctDetectBtn.addEventListener("click", () => runTool("detect_ai", "Scan"));
+  ctHumanizeBtn.addEventListener("click", () => runTool("humanize", "Humanize"));
+  ctParaphraseBtn.addEventListener("click", () => runTool("paraphrase", "Paraphrase"));
 }
 </script>
 
