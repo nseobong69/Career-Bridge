@@ -1053,6 +1053,13 @@ async function renderJobs(user) {
         <option value="arbeitnow">Arbeitnow</option>
         <option value="jobicy">Jobicy</option>
         <option value="adzuna">Adzuna</option>
+        <option value="nhs_jobs">NHS Jobs</option>
+      </select>
+
+      <label>Sponsorship</label>
+      <select id="sponsorFilter">
+        <option value="">All jobs</option>
+        <option value="sponsor">Licensed sponsor only</option>
       </select>
     </div>
 
@@ -1065,6 +1072,11 @@ async function renderJobs(user) {
   let allLoadedJobs = [];
 
   document.getElementById("sourceFilter").addEventListener("change", () => {
+    currentPage = 0;
+    loadJobsList(false);
+  });
+
+  document.getElementById("sponsorFilter").addEventListener("change", () => {
     currentPage = 0;
     loadJobsList(false);
   });
@@ -1123,10 +1135,12 @@ async function renderJobs(user) {
     if (!append) listEl.innerHTML = `<p class="msg">Loading jobs...</p>`;
 
     const selectedSource = document.getElementById("sourceFilter")?.value || "";
+    const sponsorOnly = document.getElementById("sponsorFilter")?.value === "sponsor";
     const keyword = document.getElementById("keywordSearch")?.value.trim() || "";
 
     let query = sb.from("jobs").select("*").order("posted_at", { ascending: false });
     if (selectedSource) query = query.eq("source", selectedSource);
+    if (sponsorOnly) query = query.eq("is_licensed_sponsor", true);
 
     if (keyword) {
       // Matches the keyword against title, company, or location (case-insensitive)
@@ -1164,6 +1178,10 @@ async function renderJobs(user) {
           <h2 style="font-size:16px;">${job.title}</h2>
           <p class="msg">${job.company} · ${job.location}${job.salary ? ' · ' + job.salary : ''}</p>
           <p class="msg" style="text-transform:uppercase;font-size:11px;letter-spacing:0.5px;color:#999;">${job.source}</p>
+          ${job.is_licensed_sponsor
+            ? `<p class="msg success" style="font-weight:600;">✓ Licensed sponsor${job.sponsor_match_confidence === 'fuzzy' ? ' (approximate match — verify)' : ''}</p>`
+            : ''
+          }
           ${match
             ? `<p class="msg success">Match score: ${match.overall_score}%</p>
                ${match.prepared_at
