@@ -1137,8 +1137,23 @@ async function renderJobs(user) {
       });
       const data = await res.json();
 
-      msg.className = data.error ? "msg error" : "msg success";
-      msg.textContent = data.error || `Fetched ${data.fetched} across all sources, added/updated ${data.upserted}.`;
+      if (data.error) {
+        msg.className = "msg error";
+        msg.textContent = data.error;
+      } else {
+        msg.className = "msg success";
+        const bs = data.by_source || {};
+        const lines = Object.keys(bs).map((key) => {
+          const s = bs[key];
+          if (s && s.skipped) return `${key}: skipped (missing keys)`;
+          if (s && s.perSourceResults) {
+            const custom = Object.entries(s.perSourceResults).map(([id, count]) => `${id}:${count}`).join(", ");
+            return `${key}: ${s.fetched} fetched / ${s.upserted} upserted${custom ? " (" + custom + ")" : ""}`;
+          }
+          return `${key}: ${s.fetched} fetched / ${s.upserted} upserted`;
+        });
+        msg.innerHTML = `Fetched ${data.fetched} across all sources, added/updated ${data.upserted}, ${data.sponsorMatched || 0} sponsor matches.<br><small>${lines.join("<br>")}</small>`;
+      }
     } catch (err) {
       msg.className = "msg error";
       msg.textContent = "Fetch failed: " + err.message;
