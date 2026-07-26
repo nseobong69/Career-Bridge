@@ -1131,10 +1131,14 @@ async function renderJobs(user) {
       const { data: sessionData } = await sb.auth.getSession();
       const token = sessionData.session.access_token;
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 min client-side cap
       const res = await fetch(FETCH_JOBS_FUNCTION_URL, {
         method: "POST",
         headers: { "Authorization": `Bearer ${token}`, "apikey": SUPABASE_ANON_KEY },
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       const data = await res.json();
 
       if (data.error) {
@@ -1156,7 +1160,9 @@ async function renderJobs(user) {
       }
     } catch (err) {
       msg.className = "msg error";
-      msg.textContent = "Fetch failed: " + err.message;
+      msg.textContent = err.name === "AbortError"
+        ? "Fetch timed out after 2 minutes — the function is likely taking too long server-side (check Supabase Logs)."
+        : "Fetch failed: " + err.message;
     }
 
     btn.disabled = false;
