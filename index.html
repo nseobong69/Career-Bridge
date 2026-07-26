@@ -1040,6 +1040,15 @@ async function renderJobs(user) {
         <button id="fetchBtn">Fetch Latest Jobs (Admin)</button>
         <div class="msg hidden" id="fetchMsg"></div>
       </div>
+
+      <div class="card">
+        <label>Add a custom job search URL (e.g. HealthJobsUK sector/region search)</label>
+        <input type="text" id="customSourceUrl" placeholder="https://www.healthjobsuk.com/job_list?..." />
+        <input type="text" id="customSourceLabel" placeholder="Label (optional, e.g. Apprenticeships)" style="margin-top:6px;" />
+        <button class="secondary" id="addCustomSourceBtn" style="margin-top:8px;">Add Source</button>
+        <div class="msg hidden" id="customSourceMsg"></div>
+        <div id="customSourcesList" style="margin-top:12px;"></div>
+      </div>
     ` : ''}
 
     <div class="card">
@@ -1054,6 +1063,7 @@ async function renderJobs(user) {
         <option value="jobicy">Jobicy</option>
         <option value="adzuna">Adzuna</option>
         <option value="nhs_jobs">NHS Jobs</option>
+        <option value="healthjobsuk">HealthJobsUK</option>
       </select>
 
       <label>Sponsorship</label>
@@ -1139,6 +1149,74 @@ async function renderJobs(user) {
     currentPage = 0;
     loadJobsList(false);
     });
+  }
+
+  if (isAdmin) {
+    async function loadCustomSources() {
+      const listEl = document.getElementById("customSourcesList");
+      if (!listEl) return;
+      const { data: sources } = await sb
+        .from("custom_job_sources")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (!sources || sources.length === 0) {
+        listEl.innerHTML = `<p class="msg" style="font-size:12px;color:#999;">No custom sources added yet.</p>`;
+        return;
+      }
+
+      listEl.innerHTML = sources.map(s => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee;">
+          <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80%;">
+            <strong>${s.label || '(no label)'}</strong>${s.active ? '' : ' — paused'}<br/>
+            <span style="color:#999;">${s.url}</span>
+            ${s.last_fetched_at ? `<br/><span style="color:#999;">Last fetch: ${s.last_fetch_count ?? 0} jobs</span>` : ''}
+          </div>
+          <button class="secondary remove-source-btn" data-id="${s.id}" style="font-size:12px;padding:4px 8px;">Remove</button>
+        </div>
+      `).join("");
+
+      document.querySelectorAll(".remove-source-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          await sb.from("custom_job_sources").delete().eq("id", btn.dataset.id);
+          loadCustomSources();
+        });
+      });
+    }
+
+    loadCustomSources();
+
+    const addCustomSourceBtn = document.getElementById("addCustomSourceBtn");
+    if (addCustomSourceBtn) {
+      addCustomSourceBtn.addEventListener("click", async () => {
+        const urlInput = document.getElementById("customSourceUrl");
+        const labelInput = document.getElementById("customSourceLabel");
+        const msg = document.getElementById("customSourceMsg");
+        const url = urlInput.value.trim();
+        const label = labelInput.value.trim();
+
+        msg.classList.remove("hidden");
+
+        if (!url || !url.startsWith("http")) {
+          msg.className = "msg error";
+          msg.textContent = "Please paste a valid URL starting with http:// or https://";
+          return;
+        }
+
+        const { error } = await sb.from("custom_job_sources").insert({ url, label: label || null });
+        if (error) {
+          msg.className = "msg error";
+          msg.textContent = "Failed to add: " + error.message;
+          return;
+        }
+
+        msg.className = "msg success";
+        msg.textContent = "Source added. It will be included next time you tap 'Fetch Latest Jobs'.";
+        urlInput.value = "";
+        labelInput.value = "";
+        loadCustomSources();
+      });
+    }
   }
 
   async function loadJobsList(append = false) {
