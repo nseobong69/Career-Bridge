@@ -1061,6 +1061,9 @@ async function renderJobs(user) {
         <option value="">All jobs</option>
         <option value="sponsor">Licensed sponsor only</option>
       </select>
+
+      <label>Location</label>
+      <input type="text" id="locationFilter" placeholder="e.g. UK, London, Remote, Lagos" />
     </div>
 
     <div id="jobsList"></div>
@@ -1079,6 +1082,15 @@ async function renderJobs(user) {
   document.getElementById("sponsorFilter").addEventListener("change", () => {
     currentPage = 0;
     loadJobsList(false);
+  });
+
+  let locationTimeout;
+  document.getElementById("locationFilter").addEventListener("input", () => {
+    clearTimeout(locationTimeout);
+    locationTimeout = setTimeout(() => {
+      currentPage = 0;
+      loadJobsList(false);
+    }, 400);
   });
 
   let searchTimeout;
@@ -1136,11 +1148,13 @@ async function renderJobs(user) {
 
     const selectedSource = document.getElementById("sourceFilter")?.value || "";
     const sponsorOnly = document.getElementById("sponsorFilter")?.value === "sponsor";
+    const locationSearch = document.getElementById("locationFilter")?.value.trim() || "";
     const keyword = document.getElementById("keywordSearch")?.value.trim() || "";
 
     let query = sb.from("jobs").select("*").order("posted_at", { ascending: false });
     if (selectedSource) query = query.eq("source", selectedSource);
     if (sponsorOnly) query = query.eq("is_licensed_sponsor", true);
+    if (locationSearch) query = query.ilike("location", `%${locationSearch}%`);
 
     if (keyword) {
       // Matches the keyword against title, company, or location (case-insensitive)
