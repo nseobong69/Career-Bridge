@@ -372,6 +372,7 @@ async function render() {
   if (route === "interview") return renderInterview(user);
   if (route === "billing") return renderBilling(user);
   if (route === "admin") return renderAdmin(user);
+  if (route === "cv-bank") return renderCvBank(user);
   if (route === "content-tools") return renderContentTools(user);
   return renderLogin();
 }
@@ -873,6 +874,7 @@ async function renderMatch(user) {
       <button id="scoreBtn">Get Match Score</button>
       <button class="secondary" id="tailorBtn">Tailor My Resume</button>
       <button class="secondary" id="coverBtn">Generate Cover Letter</button>
+      <button class="secondary" id="supportingBtn">Write Supporting Statement</button>
 
       <div class="msg hidden" id="matchMsg"></div>
     </div>
@@ -980,6 +982,7 @@ async function renderMatch(user) {
         score: "Match Score",
         tailor_resume: "Tailored Resume",
         cover_letter: "Cover Letter",
+        supporting_statement: "Supporting Statement",
       };
       resultTitle.textContent = titles[action] || "Result";
 
@@ -1013,6 +1016,10 @@ async function renderMatch(user) {
   document.getElementById("scoreBtn").addEventListener("click", () => callTailorFunction("score"));
   document.getElementById("tailorBtn").addEventListener("click", () => callTailorFunction("tailor_resume"));
   document.getElementById("coverBtn").addEventListener("click", () => callTailorFunction("cover_letter"));
+  const supportingBtn = document.getElementById("supportingBtn");
+  if (supportingBtn) {
+    supportingBtn.addEventListener("click", () => callTailorFunction("supporting_statement"));
+  }
 }
 
 // ------------------------------------------------------------
@@ -1022,6 +1029,15 @@ async function renderJobs(user) {
   const { data: profile } = await sb.from("profiles").select("resume_text, is_admin").eq("id", user.id).single();
   const resumeText = profile?.resume_text || "";
   const isAdmin = profile?.is_admin || false;
+
+  // Admins can score against any CV saved in the CV Bank instead of just
+  // their own profile resume. Defaults to the admin's own resume text;
+  // switches when a CV is picked from the dropdown below.
+  let cvBank = [];
+  if (isAdmin) {
+    const { data: cvs } = await sb.from("admin_cvs").select("id, label, resume_text").order("created_at", { ascending: false });
+    cvBank = cvs || [];
+  }
 
   app.innerHTML = `
     <div class="topbar">
@@ -1295,6 +1311,13 @@ async function renderJobs(user) {
             ? `<p class="msg success" style="font-weight:600;">✓ Licensed sponsor${job.sponsor_match_confidence === 'fuzzy' ? ' (approximate match — verify)' : ''}</p>`
             : ''
           }
+          ${isAdmin && !match ? `
+            <label style="font-size:12px;">Score using CV</label>
+            <select id="cv-select-${job.id}" style="margin-bottom:8px;">
+              <option value="">My own resume${resumeText ? '' : ' (none saved)'}</option>
+              ${cvBank.map(cv => `<option value="${cv.id}">${cv.label || 'Untitled CV'}</option>`).join("")}
+            </select>
+          ` : ''}
           ${match
             ? `<p class="msg success">Match score: ${match.overall_score}%</p>
                ${match.prepared_at
@@ -1302,7 +1325,7 @@ async function renderJobs(user) {
                  : `<button class="secondary prepare-btn" data-job-id="${job.id}">Prepare Full Application</button>`
                }
                <div class="msg hidden prepare-result" id="prepare-${job.id}"></div>`
-            : `<button class="secondary score-btn" data-job-id="${job.id}" ${!resumeText ? 'disabled' : ''}>Score This Job</button>`
+            : `<button class="secondary score-btn" data-job-id="${job.id}" ${(!resumeText && !isAdmin) ? 'disabled' : ''}>Score This Job</button>`
           }
           <div class="msg hidden score-result" id="score-${job.id}"></div>
           <a href="${job.url}" target="_blank" style="font-size:13px;">View original listing →</a>
@@ -1330,6 +1353,19 @@ async function renderJobs(user) {
     }
   }
 
+  // Admins pick a CV per job card via the "Score using CV" dropdown; falls
+  // back to the admin's own saved resume, or the plain profile resume for
+  // non-admins.
+  const lastUsedCvByJob = {};
+
+  function resolveResumeText(jobId) {
+    if (!isAdmin) return resumeText;
+    const picker = document.getElementById(`cv-select-${jobId}`);
+    if (!picker || !picker.value) return resumeText;
+    const chosen = cvBank.find(cv => cv.id === picker.value);
+    return chosen ? (chosen.resume_text || "") : resumeText;
+  }
+
   async function scoreJob(jobId, jobs) {
     const job = jobs.find(j => j.id === jobId);
     const resultEl = document.getElementById(`score-${jobId}`);
@@ -1338,6 +1374,14 @@ async function renderJobs(user) {
     const usage = await checkUsageAllowed(user);
     if (!usage.allowed) {
       resultEl.textContent = `You've used all ${usage.limit} AI actions on the ${usage.plan} plan this month. Upgrade on the Billing page.`;
+      return;
+    }
+
+    const scoringResumeText = resolveResumeText(jobId);
+    lastUsedCvByJob[jobId] = scoringResumeText;
+    if (!scoringResumeText) {
+      resultEl.className = "msg error";
+      resultEl.textContent = "No CV text available. Select a CV from the CV Bank dropdown above, or save your own resume first.";
       return;
     }
 
@@ -1355,7 +1399,7 @@ async function renderJobs(user) {
           "apikey": SUPABASE_ANON_KEY,
         },
         body: JSON.stringify({
-          resumeText,
+          resumeText: scoringResumeText,
           jobDescription: job.description,
           action: "score",
         }),
@@ -1415,6 +1459,10 @@ async function renderJobs(user) {
     resultEl.className = "msg";
     resultEl.textContent = "Preparing tailored resume...";
 
+    // Reuse whichever CV was used to score this job, falling back to the
+    // admin's own resume (or the plain profile resume for non-admins).
+    const applicationResumeText = lastUsedCvByJob[jobId] || resumeText;
+
     try {
       const { data: sessionData } = await sb.auth.getSession();
       const token = sessionData.session.access_token;
@@ -1427,7 +1475,7 @@ async function renderJobs(user) {
             "Authorization": `Bearer ${token}`,
             "apikey": SUPABASE_ANON_KEY,
           },
-          body: JSON.stringify({ resumeText, jobDescription: job.description, action }),
+          body: JSON.stringify({ resumeText: applicationResumeText, jobDescription: job.description, action }),
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -2330,6 +2378,12 @@ async function renderAdmin(user) {
         <p class="msg">Scan text for AI patterns, humanize, or paraphrase — up to 50,000 words</p>
       </div>
     </a>
+    <a href="#cv-bank" class="nav-tile">
+      <div class="card" style="border-color:#111;">
+        <h2 style="font-size:16px;">CV Bank</h2>
+        <p class="msg">Upload and manage multiple CVs, then pick one to score against a job</p>
+      </div>
+    </a>
     <div id="adminBody"><p class="msg">Loading stats...</p></div>
   `;
 
@@ -2394,6 +2448,131 @@ async function renderAdmin(user) {
       ${Object.entries(usageByAction).map(([action, count]) => `<p class="msg">${action}: ${count}</p>`).join("")}
     </div>
   `;
+}
+
+// ------------------------------------------------------------
+// ADMIN CV BANK — upload/manage multiple candidate CVs, so any of them
+// can be picked later when scoring a job match.
+// ------------------------------------------------------------
+async function renderCvBank(user) {
+  const { data: profile } = await sb.from("profiles").select("is_admin").eq("id", user.id).single();
+
+  if (!profile?.is_admin) {
+    app.innerHTML = `
+      <div class="card">
+        <h2>Not authorized</h2>
+        <p class="msg">This page is restricted to admin accounts.</p>
+        <p class="link"><a href="#dashboard">Back to dashboard</a></p>
+      </div>
+    `;
+    return;
+  }
+
+  app.innerHTML = `
+    <div class="topbar">
+      <h1 style="font-size:20px;margin:0;">CV Bank</h1>
+      <button class="secondary" id="backBtn">Back</button>
+    </div>
+
+    <div class="card">
+      <h2>Add a CV</h2>
+      <label>Label (e.g. candidate name or role)</label>
+      <input type="text" id="cvLabel" placeholder="e.g. Jane Doe — Accountant" />
+      <label>CV file (PDF or DOCX)</label>
+      <input type="file" id="cvFile" accept=".pdf,.docx,.txt" />
+      <button class="secondary" id="addCvBtn" style="margin-top:8px;">Add to CV Bank</button>
+      <div class="msg hidden" id="cvAddMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Saved CVs</h2>
+      <div id="cvBankList"><p class="msg">Loading...</p></div>
+    </div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    window.location.hash = "admin";
+  });
+
+  async function loadCvList() {
+    const listEl = document.getElementById("cvBankList");
+    const { data: cvs, error } = await sb
+      .from("admin_cvs")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      listEl.innerHTML = `<p class="msg error">Could not load CVs: ${error.message}</p>`;
+      return;
+    }
+
+    if (!cvs || cvs.length === 0) {
+      listEl.innerHTML = `<p class="msg">No CVs uploaded yet.</p>`;
+      return;
+    }
+
+    listEl.innerHTML = cvs.map(cv => `
+      <div class="card" style="margin-bottom:10px;">
+        <p style="font-weight:600;margin:0 0 4px;">${cv.label || "Untitled CV"}</p>
+        ${cv.file_url ? `<p class="msg"><a href="${cv.file_url}" target="_blank">${cv.file_name || "View file"}</a></p>` : ""}
+        <p class="msg" style="color:#888;">Added ${new Date(cv.created_at).toLocaleDateString()}</p>
+        <button class="secondary delete-cv-btn" data-cv-id="${cv.id}" style="margin-top:6px;">Delete</button>
+      </div>
+    `).join("");
+
+    listEl.querySelectorAll(".delete-cv-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Delete this CV from the bank?")) return;
+        await sb.from("admin_cvs").delete().eq("id", btn.dataset.cvId);
+        loadCvList();
+      });
+    });
+  }
+
+  loadCvList();
+
+  document.getElementById("addCvBtn").addEventListener("click", async () => {
+    const labelInput = document.getElementById("cvLabel");
+    const fileInput = document.getElementById("cvFile");
+    const msg = document.getElementById("cvAddMsg");
+    const file = fileInput.files[0];
+
+    if (!file) {
+      msg.classList.remove("hidden");
+      msg.className = "msg error";
+      msg.textContent = "Please choose a CV file first.";
+      return;
+    }
+
+    msg.classList.remove("hidden");
+    msg.className = "msg";
+    msg.textContent = "Reading file...";
+
+    try {
+      const text = await extractTextFromFile(file);
+
+      msg.textContent = "Uploading...";
+      const uploaded = await uploadResumeToCloudinary(file, user.id);
+
+      const { error } = await sb.from("admin_cvs").insert({
+        admin_id: user.id,
+        label: labelInput.value.trim() || file.name,
+        resume_text: text,
+        file_url: uploaded?.url || null,
+        file_name: file.name,
+      });
+      if (error) throw error;
+
+      msg.className = "msg success";
+      msg.textContent = "CV added to the bank.";
+      labelInput.value = "";
+      fileInput.value = "";
+      loadCvList();
+    } catch (err) {
+      msg.className = "msg error";
+      msg.textContent = "Could not add CV: " + err.message;
+    }
+  });
 }
 
 function selectField(name, label, value, options) {
