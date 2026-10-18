@@ -47,13 +47,13 @@
   </ul>
 
   <h2>What the browser extension does</h2>
-  <p>The extension only does something when you press a button in its popup.</p>
+  <p>The extension does nothing until you open it on a page by clicking or tapping its icon.</p>
   <ul>
     <li>When you log in, it sends your email and password to Career Bridge, then keeps a login token (not your password) in the extension's storage on your device until you log out.</li>
-    <li>It sends us the address of the page you open it on, so we can match the job and your application.</li>
-    <li>When you press "Save this advert", it sends us the advert's text.</li>
+    <li>When you open it, it checks in your browser whether the page is a job advert or an application form, and sends us the page's address so we can match the job and your application.</li>
+    <li>When you press "Save this advert", it sends us the advert's title and text, and links to any job description files on the page.</li>
     <li>To fill in a form, it reads the labels of the boxes on the page in your browser and fills them with the details you saved in Career Bridge. What you type into a job site isn't sent to us.</li>
-    <li>It never collects passwords for job sites, never answers questions about right to work, nationality, criminal records, health, equality monitoring or declarations, and never reads pages where you haven't pressed a button.</li>
+    <li>It never collects passwords for job sites, never answers questions about right to work, nationality, criminal records, health, equality monitoring or declarations, and never reads a page you haven't opened it on.</li>
   </ul>
 
   <h2>How we use your information</h2>
@@ -64,7 +64,7 @@
     <li><strong>Supabase</strong> hosts our database, login system, file storage and server functions. Your account, profile, CV, Evidence Bank and applications are stored there.</li>
     <li><strong>Groq</strong> runs the AI that checks your fit and drafts text. When you use those features, it receives what it needs for that task: the advert text, your Evidence Bank and profile facts, your CV text, and any screenshots of application questions you upload.</li>
     <li><strong>Paystack</strong> processes payments, when paid plans are available.</li>
-    <li><strong>GitHub Pages</strong> hosts this website. Like any web host, it may keep technical logs such as IP addresses.</li>
+    <li><strong>Render</strong> hosts this website. Like any web host, it may keep technical logs such as IP addresses.</li>
     <li><strong>Google Fonts, jsDelivr, cdnjs and open.er-api.com</strong> supply the website's fonts, code libraries and currency exchange rates. Your browser contacts them directly, so they see your IP address.</li>
   </ul>
   <p>Some of these providers may process information outside the country you live in. Job listings come from public job feeds; we don't send your information to them.</p>
