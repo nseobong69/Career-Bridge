@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Application form - Northfield Careers (sample)</title>
+<style>
+  body { font-family: "Segoe UI", Roboto, Arial, sans-serif; margin: 0; color: #1f2933; background: #eef2f4; line-height: 1.5; }
+  .sample { margin: 0; padding: 10px 16px; background: #fff3c4; color: #5c4400; font-size: 14px; text-align: center; }
+  header { background: #0f5c63; color: #fff; padding: 14px 16px; display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; align-items: center; }
+  header strong { font-size: 19px; }
+  header span { font-size: 14px; opacity: .85; }
+  main { max-width: 760px; margin: 18px auto; padding: 20px 22px; background: #fff; border-radius: 6px; }
+  h1 { font-size: 26px; line-height: 1.2; margin: 0 0 6px; }
+  h2 { font-size: 18px; margin: 26px 0 4px; padding-top: 14px; border-top: 1px solid #d9e2e7; }
+  .meta { color: #52606d; margin: 0 0 6px; }
+  label { display: block; font-weight: 600; margin: 14px 0 5px; font-size: 15px; }
+  .hint { color: #52606d; font-size: 13px; margin: -2px 0 6px; }
+  input[type=text], input[type=email], input[type=tel], textarea { width: 100%; max-width: 520px; padding: 8px 10px; font: inherit; border: 1px solid #9aa5b1; border-radius: 4px; box-sizing: border-box; }
+  textarea { max-width: none; min-height: 220px; resize: vertical; }
+  .row { display: flex; flex-wrap: wrap; gap: 0 16px; }
+  .row > div { flex: 1 1 200px; }
+  fieldset { border: 0; padding: 0; margin: 16px 0; }
+  legend { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+  .choice { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; margin: 0 18px 0 0; }
+  button { margin-top: 22px; padding: 11px 20px; background: #0f5c63; color: #fff; border: 0; border-radius: 4px; font: 600 15px "Segoe UI", Roboto, Arial, sans-serif; cursor: pointer; }
+  #sent { margin: 12px 0 0; color: #0f5c63; font-weight: 600; }
+  @media (max-width: 800px) { main { margin: 12px; padding: 16px; } }
+</style>
+</head>
+<body>
+<p class="sample">Sample form for trying the Career Bridge browser extension. Nothing you type here is sent anywhere.</p>
+<header><strong>Northfield Careers</strong><span>Application: Patient Experience Officer</span></header>
+<main>
+  <h1>Your application</h1>
+  <p class="meta">Patient Experience Officer · Northfield Community Hospital (sample)</p>
+  <form id="form">
+    <h2>Your details</h2>
+    <div class="row">
+      <div><label for="fn">First name</label><input id="fn" type="text"></div>
+      <div><label for="ln">Last name</label><input id="ln" type="text"></div>
+    </div>
+    <label for="em">Email address</label><input id="em" type="email">
+    <label for="ph">Mobile phone number</label><input id="ph" type="tel">
+    <label for="a1">Address line 1</label><input id="a1" type="text">
+    <div class="row">
+      <div><label for="town">Town or city</label><input id="town" type="text"></div>
+      <div><label for="pc">Postcode</label><input id="pc" type="text"></div>
+    </div>
+
+    <h2>Supporting information</h2>
+    <label for="si">Supporting information</label>
+    <p class="hint" id="sih">Explain how you meet the essential and desirable criteria in the person specification. Use up to 1500 words.</p>
+    <textarea id="si" aria-describedby="sih"></textarea>
+
+    <h2>Questions only you can answer</h2>
+    <p class="hint">Career Bridge outlines these in orange and leaves them for you.</p>
+    <label for="ni">National Insurance number</label>
+    <p class="hint" id="nih">For example, QQ 12 34 56 C</p>
+    <input id="ni" type="text" aria-describedby="nih">
+    <label for="nat">Nationality</label><input id="nat" type="text">
+    <fieldset>
+      <legend>Do you need sponsorship to work in the UK?</legend>
+      <label class="choice"><input type="radio" name="sponsor" value="yes"> Yes</label>
+      <label class="choice"><input type="radio" name="sponsor" value="no"> No</label>
+    </fieldset>
+    <label class="choice"><input type="checkbox" id="declare"> I confirm the information I have given is true.</label>
+    <br>
+    <button type="submit">Submit application</button>
+    <p id="sent" hidden>This is a sample form, so nothing was sent.</p>
+  </form>
+</main>
+<script>
+  document.getElementById("form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    document.getElementById("sent").hidden = false;
+  });
+</script>
+</body>
+</html>
